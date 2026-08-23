@@ -73,6 +73,29 @@ class BuildCmdTests(unittest.TestCase):
         self.assertEqual(cmd[-1], str(dst))
 
 
+class ParseProgressTests(unittest.TestCase):
+    def test_out_time_us_is_seconds(self):
+        self.assertEqual(encode._parse_progress_line("out_time_us=4000000"), 4.0)
+
+    def test_out_time_ms_actually_microseconds(self):
+        self.assertEqual(encode._parse_progress_line("out_time_ms=1500000"), 1.5)
+
+    def test_ignores_non_time_keys(self):
+        self.assertIsNone(encode._parse_progress_line("frame=60"))
+        self.assertIsNone(encode._parse_progress_line("fps=12.5"))
+        self.assertIsNone(encode._parse_progress_line("progress=continue"))
+        self.assertIsNone(encode._parse_progress_line("no equals sign"))
+
+    def test_na_time_value(self):
+        self.assertIsNone(encode._parse_progress_line("out_time_us=N/A"))
+
+    def test_speed_parsing(self):
+        self.assertAlmostEqual(encode._parse_speed("speed= 279x"), 279.0)
+        self.assertAlmostEqual(encode._parse_speed("speed=1.25x"), 1.25)
+        self.assertIsNone(encode._parse_speed("speed=N/A"))
+        self.assertIsNone(encode._parse_speed("frame=60"))
+
+
 class AdaptiveFallbackTests(unittest.TestCase):
     def test_missing_binary_returns_none(self):
         import logging

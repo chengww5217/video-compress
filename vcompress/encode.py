@@ -3,6 +3,7 @@ import shlex
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 _active_procs = set()
@@ -81,6 +82,29 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
     ]
 
 
+def _parse_progress_line(line: str):
+    if "=" not in line:
+        return None
+    key, _, value = line.partition("=")
+    value = value.strip()
+    if key in ("out_time_us", "out_time_ms"):
+        try:
+            return float(value) / 1e6
+        except ValueError:
+            return None
+    return None
+
+
+def _parse_speed(line: str):
+    if not line.startswith("speed="):
+        return None
+    value = line.partition("=")[2].strip().rstrip("x")
+    try:
+        return float(value)
+    except ValueError:
+        return None
+
+
 def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
     proc = subprocess.Popen(
         cmd,
@@ -92,19 +116,30 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
     )
     register(proc)
     err_tail = ""
+    start = time.monotonic()
+    last_time = start
+    last_pos = 0.0
+    last_speed = 0.0
     try:
-        for line in proc.stdout:
-            line = line.strip()
-            if not line or not progress_cb or total_duration <= 0:
+        for raw in proc.stdout:
+            line = raw.strip()
+            pos = _parse_progress_line(line)
+            if pos is None:
                 continue
-            try:
-                data = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            t_us = data.get("out_time_us") or data.get("out_time_ms")
-            if t_us:
-                pct = min(99.9, float(t_us) / 1e6 / total_duration * 100)
-                progress_cb(pct)
+            now = time.monotonic()
+            if pos > last_pos and now > last_time:
+                inst = (pos - last_pos) / (now - last_time)
+                last_speed = 0.5 * last_speed + 0.5 * inst
+            last_time = now
+            last_pos = pos
+            if progress_cb:
+                if total_duration > 0:
+                    pct = min(99.9, pos / total_duration * 100)
+                    remaining = max(0.0, total_duration - pos)
+                    eta = remaining / last_speed if last_speed > 0 else 0.0
+                    progress_cb(pct, eta, last_speed)
+                else:
+                    progress_cb(None, pos, last_speed)
         err_tail = proc.stderr.read()[-2000:]
         rc = proc.wait()
     except BaseException:

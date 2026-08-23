@@ -95,15 +95,26 @@ def clean_stale_tmp(files, tmp_suffix: str):
     return removed
 
 
+def _fmt_hms(seconds: int) -> str:
+    return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
+
+
 def process_file(ctx: Ctx, src: Path):
     store = ctx.store
     show = ctx.show_progress
 
-    def progress(pct):
-        if show:
-            name = src.name[:40]
-            sys.stdout.write(f"\r  {pct:5.1f}%  {name:<40}")
-            sys.stdout.flush()
+    def progress(pct, info_val=0.0, speed=0.0):
+        if not show:
+            return
+        name = src.name[:36]
+        if pct is None:
+            text = f"\r  {_fmt_hms(int(info_val))} processed   {name:<36}"
+        else:
+            spd = f"x{speed:.1f}" if speed > 0 else "        "
+            eta = f"eta {_fmt_hms(int(info_val)):>7}" if info_val else "eta       --"
+            text = f"\r  {pct:5.1f}%  {eta}  {spd:>7}  {name:<36}"
+        sys.stdout.write(text)
+        sys.stdout.flush()
 
     try:
         info = probe.probe(ctx.tools, src)
@@ -235,6 +246,9 @@ def setup_logging(log_file: str):
 
 
 def load_config(path: Path) -> dict:
+    if not path.exists():
+        sys.exit(f"error: config file not found: {path}\n"
+                 f"pass --config or restore config.toml next to the package")
     with open(path, "rb") as f:
         return tomllib.load(f)
 
