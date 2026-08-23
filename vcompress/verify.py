@@ -49,7 +49,8 @@ def _normalized_segment(ffmpeg: str, src: Path, start: float, seconds: float,
         raise encode.EncodeError(f"segment extract failed: {r.stderr.strip()[-300:]}")
 
 
-def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float, cfg):
+def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
+                    cfg, log=None):
     if not cfg["verify"].get("vmaf_enabled", True):
         return None, "disabled"
     segments = int(cfg["verify"].get("vmaf_segments", 3))
@@ -64,6 +65,8 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float, cfg):
             start = max(0.0, min(duration - seconds, duration * frac - seconds / 2))
             ref = root / f"ref{i}.mkv"
             dist = root / f"dist{i}.mkv"
+            if log:
+                log.info(f"vmaf spot check: segment {i + 1}/{segments}")
             try:
                 _normalized_segment(tools.ffmpeg, orig, start, seconds, ref)
                 _normalized_segment(tools.ffmpeg, compressed, start, seconds, dist)

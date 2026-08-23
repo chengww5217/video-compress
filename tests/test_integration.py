@@ -137,6 +137,7 @@ class IntegrationTests(unittest.TestCase):
         r = self.run_vcompress("--no-adaptive")
         self.assertEqual(r.returncode, 1)
         self.assertIn("[ok] src.mp4", r.stdout)
+        self.assertIn("[encode] src.mp4", r.stdout)
         self.assertIn("[fail] garbage.mp4", r.stdout)
         self.assertFalse((self.root / "src.mp4").exists(),
                          "original should be deleted after success")

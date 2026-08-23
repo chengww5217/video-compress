@@ -221,6 +221,8 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
 
     center = max(0.0, duration / 2 - seconds / 2)
     best = None
+    log.info(f"adaptive search: extracting reference segment "
+             f"({seconds:.0f}s around mid-point of {src.name})")
     tmpdir = tempfile.TemporaryDirectory(prefix="vcadapt_")
     try:
         root = Path(tmpdir.name)
@@ -232,7 +234,8 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
             sample = root / f"s{mid}.mkv"
             encode_sample(tools.ffmpeg, ref, mid, enc_cfg, sample)
             score = vmaf_score(tools.ffmpeg, sample, ref)
-            log.debug(f"adaptive probe crf={mid} vmaf={score:.2f}")
+            log.info(f"adaptive probe: crf={mid} vmaf={score:.2f} "
+                     f"(target {target})")
             if score >= target:
                 best = mid
                 lo = mid

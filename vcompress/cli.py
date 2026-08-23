@@ -158,8 +158,8 @@ def process_file(ctx: Ctx, src: Path):
             encode.audio_args(info, ctx.cfg),
             ctx.cfg["skip"]["tag_marker"] + "-v1",
         )
+        log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
         if show:
-            print(f"\n{src.name}  ->  crf={crf} ({ctx.encoder})")
             progress(0.0)
         t0 = time.monotonic()
         encode.run_encode(cmd, info.duration, progress)
@@ -179,7 +179,8 @@ def process_file(ctx: Ctx, src: Path):
         if not ok:
             raise RuntimeError(msg)
 
-        score, msg = verify.vmaf_spot_check(ctx.tools, src, tmp, info.duration, ctx.cfg)
+        score, msg = verify.vmaf_spot_check(ctx.tools, src, tmp,
+                                            info.duration, ctx.cfg, log=log)
         if msg and score is None:
             log.warning(f"{src.name}: vmaf check unavailable ({msg}); proceeding")
         elif msg:
