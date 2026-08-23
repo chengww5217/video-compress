@@ -66,6 +66,6 @@ vmaf_threshold = 93.0
 
 [run]
 workers = 1
-results_file = "results.jsonl"
+results_file = "logs/results.jsonl"
 log_file = "logs/vcompress.log"
 use_recycle_bin = false

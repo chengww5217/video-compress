@@ -24,7 +24,7 @@
 2. 按编码器与「每像素码率」（BPP = 码率 ÷ 宽 × 高 × 帧率）判断是否已压到位；
 3. 预估收益低于 15% 的不压；实际收益低于 5% 的丢弃结果、保留原件。
 
-另外 `results.jsonl` 会记录每次运行结果，重跑时自动跳过上次已成功的文件。
+另外 `logs/results.jsonl` 会记录每次运行结果，重跑时自动跳过上次已成功的文件。
 
 ## 环境要求
 
@@ -130,7 +130,7 @@ python -m vcompress D:\videos --keep
 ## 日志与记录
 
 - `logs/vcompress.log`：完整日志（DEBUG 级，含每次 VMAF 探测值）
-- `results.jsonl`：每个文件一行 JSON 的处理记录，用于断点续跑和统计
+- `logs/results.jsonl`：每个文件一行 JSON 的处理记录，用于断点续跑和统计
 
 ## 项目结构
 

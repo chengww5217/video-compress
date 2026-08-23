@@ -18,6 +18,7 @@ log = logging.getLogger("vcompress")
 class ResultStore:
     def __init__(self, path: Path):
         self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.lock = threading.Lock()
         self.history = {}
         if path.exists():
