@@ -215,7 +215,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
             best = lo
         log.info(f"adaptive crf selected: {best} (target vmaf {target})")
         return best
-    except EncodeError as e:
+    except (EncodeError, OSError) as e:
         log.warning(f"adaptive crf search failed ({e}); falling back to default")
         return None
     finally:

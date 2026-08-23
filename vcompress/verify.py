@@ -2,7 +2,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-import encode
+from . import encode
 
 
 def decode_errors(ffmpeg: str, path: Path):

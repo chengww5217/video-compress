@@ -54,13 +54,13 @@ ffmpeg -hide_banner -filters | findstr libvmaf
 
 ```powershell
 # 1. 先预览（不做任何修改，显示哪些会被压缩/跳过）
-python vcompress.py D:\videos --dry-run
+python -m vcompress D:\videos --dry-run
 
 # 2. 正式压缩整个目录（递归）
-python vcompress.py D:\videos
+python -m vcompress D:\videos
 
 # 3. 只处理单个或多个文件
-python vcompress.py "D:\movies\a.mkv" "D:\movies\b.mp4"
+python -m vcompress "D:\movies\a.mkv" "D:\movies\b.mp4"
 ```
 
 > 新安装 Python 后需**重开终端**才能使用 `python` 命令。
@@ -126,6 +126,30 @@ python vcompress.py "D:\movies\a.mkv" "D:\movies\b.mp4"
 - `logs/vcompress.log`：完整日志（DEBUG 级，含每次 VMAF 探测值）
 - `results.jsonl`：每个文件一行 JSON 的处理记录，用于断点续跑和统计
 
+## 项目结构
+
+```
+video-compress/
+├── config.toml          # 配置文件
+├── vcompress/           # 主包
+│   ├── __main__.py      # 入口（python -m vcompress）
+│   ├── cli.py           # 命令行解析与调度
+│   ├── probe.py         # ffprobe 探测与跳过判定
+│   ├── encode.py        # 编码参数生成与执行、自适应 CRF
+│   └── verify.py        # 解码校验与 VMAF 抽检
+└── tests/               # 测试（unittest）
+```
+
+## 开发与测试
+
+```powershell
+# 运行全部测试（单元测试无需 ffmpeg；集成测试缺 ffmpeg 时自动跳过）
+python -m unittest discover -s tests -v
+
+# 只跑集成测试
+python -m unittest tests.test_integration -v
+```
+
 ## 常见问题
 
 **Q：为什么压缩很慢？**
@@ -135,7 +159,7 @@ python vcompress.py "D:\movies\a.mkv" "D:\movies\b.mp4"
 把 `[adaptive].target_vmaf` 从 95 降到 92~93，或调高各编码器 `crf`。
 
 **Q：某些播放设备放不了 AV1？**
-改用 `python vcompress.py ... --encoder x265`，或在配置里永久切换。
+改用 `python -m vcompress ... --encoder x265`，或在配置里永久切换。
 
 **Q：如何强制重新压缩已处理过的文件？**
 删除文件元数据里的标记较麻烦，直接改用一份 `min_saving_ratio = 1.0` 且清空 `expected_ratio`/`bpp` 的配置即可绕过跳过判定。

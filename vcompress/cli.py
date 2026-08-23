@@ -10,9 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
-import encode
-import probe
-import verify
+from . import encode, probe, verify
 
 log = logging.getLogger("vcompress")
 
@@ -247,7 +245,8 @@ def main():
         description="ffmpeg-based visually-lossless video compressor",
     )
     ap.add_argument("paths", nargs="+", help="video files or directories")
-    ap.add_argument("--config", default=str(Path(__file__).parent / "config.toml"))
+    ap.add_argument("--config",
+                    default=str(Path(__file__).resolve().parents[1] / "config.toml"))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--force", action="store_true",
                     help="re-process files skipped/ok in previous runs")
@@ -329,12 +328,3 @@ def main():
     if counts["ok"]:
         log.info(f"session savings: see {store_path}")
     return 1 if counts["failed"] else 0
-
-
-if __name__ == "__main__":
-    try:
-        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
-        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
-    except Exception:
-        pass
-    sys.exit(main())
