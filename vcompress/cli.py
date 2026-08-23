@@ -185,27 +185,40 @@ def process_file(ctx: Ctx, src: Path):
             raise RuntimeError(msg)
 
         recycle = ctx.recycle
-        if target.exists():
-            if recycle:
-                _trash(target)
-            else:
-                target.unlink()
-        os.replace(tmp, target)
-        if str(target.resolve()) != str(src.resolve()):
-            if recycle:
-                _trash(src)
-            else:
-                src.unlink()
+        final = target
+        if ctx.keep:
+            if str(target.resolve()) == str(src.resolve()):
+                final = src.with_name(f"{src.stem}.{ctx.encoder}{out_ext}")
+            if final.exists():
+                raise RuntimeError(
+                    f"keep mode: output already exists, refusing to "
+                    f"overwrite: {final.name}"
+                )
+            os.replace(tmp, final)
+        else:
+            if target.exists():
+                if recycle:
+                    _trash(target)
+                else:
+                    target.unlink()
+            os.replace(tmp, target)
+            if str(target.resolve()) != str(src.resolve()):
+                if recycle:
+                    _trash(src)
+                else:
+                    src.unlink()
 
-        saving = 1 - target.stat().st_size / info.size
+        saving = 1 - final.stat().st_size / info.size
+        kept = ", original kept" if ctx.keep else ""
         log.info(
             f"[ok] {src.name}: crf={crf} saved {saving:.1%} "
-            f"({info.size / 1048576:.0f} -> {target.stat().st_size / 1048576:.0f} MB, "
-            f"{elapsed:.0f}s)"
+            f"({info.size / 1048576:.0f} -> {final.stat().st_size / 1048576:.0f} MB, "
+            f"{elapsed:.0f}s{kept})"
         )
-        store.add("ok", info, output=str(target), crf=crf,
-                  new_size=target.stat().st_size,
-                  saving=round(saving, 4), seconds=round(elapsed, 1))
+        store.add("ok", info, output=str(final), crf=crf,
+                  new_size=final.stat().st_size,
+                  saving=round(saving, 4), seconds=round(elapsed, 1),
+                  kept=ctx.keep)
         return "ok"
 
     except Exception as e:
@@ -270,6 +283,10 @@ def main():
     ap.add_argument("--no-adaptive", dest="adaptive", action="store_false")
     ap.add_argument("--recycle", action="store_true",
                     help="move originals to recycle bin instead of deleting")
+    ap.add_argument("--keep", action="store_true",
+                    help="keep the original file; only write the compressed copy "
+                         "(collisions are named <name>.<encoder><ext>, still "
+                         "colliding files fail instead of being overwritten)")
     args = ap.parse_args()
 
     cfg = load_config(Path(args.config))
@@ -300,6 +317,7 @@ def main():
     ctx.adaptive = args.adaptive
     ctx.encoder = encoder
     ctx.recycle = args.recycle or run_cfg.get("use_recycle_bin", False)
+    ctx.keep = args.keep or run_cfg.get("keep_original", False)
     workers = args.workers or int(run_cfg.get("workers", 1))
     ctx.show_progress = workers == 1 and not args.dry_run
 

@@ -77,6 +77,7 @@ python -m vcompress "D:\movies\a.mkv" "D:\movies\b.mp4"
 | `--workers N` | 并发处理的文件数（默认 1；单文件编码本身已是多线程） |
 | `--force` | 忽略 `results.jsonl` 缓存，重新处理所有文件（元数据标记仍生效） |
 | `--recycle` | 删除原文件时进回收站而不是直接删除 |
+| `--keep` | 只生成压缩副本、不删原文件；输出与原文件同名时自动改名为 `<名字>.<编码器><扩展名>`（如 `a.av1.mkv`），仍重名则该文件直接报错，绝不覆盖 |
 | `--config 路径` | 指定配置文件（默认同目录下 `config.toml`） |
 
 退出码：`0` 全部成功；`1` 存在失败；`130` 被 Ctrl+C 中断。
@@ -120,6 +121,8 @@ python -m vcompress "D:\movies\a.mkv" "D:\movies\b.mp4"
 | VMAF 抽检 3 段均值 ≥ 93 | 开 | 保留原件 |
 
 任何一项不过都会删除临时文件并保留原文件，不会出现"压坏了还删了原件"的情况。
+
+`--keep` 也可在配置中设为默认：在 `[run]` 节加 `keep_original = true`。
 
 ## 日志与记录
 

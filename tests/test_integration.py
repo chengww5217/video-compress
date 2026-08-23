@@ -1,3 +1,7 @@
+﻿import sys
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 import json
 import subprocess
 import sys
@@ -100,16 +104,30 @@ class IntegrationTests(unittest.TestCase):
             check=True, capture_output=True, timeout=120,
         )
         (cls.root / "garbage.mp4").write_bytes(b"\x00" * 65536)
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(cls.root / "src.mp4"),
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+             "-pix_fmt", "yuv420p",
+             str(cls.root / "keep_src.mp4")],
+            check=True, capture_output=True, timeout=120,
+        )
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(cls.root / "src.mp4"), "-c", "copy",
+             str(cls.root / "same_ext.mkv")],
+            check=True, capture_output=True, timeout=120,
+        )
 
     @classmethod
     def tearDownClass(cls):
         import shutil
         shutil.rmtree(cls.root, ignore_errors=True)
 
-    def run_vcompress(self, *extra, src_name="src.mp4"):
+    def run_vcompress(self, *extra, videos=("src.mp4", "garbage.mp4")):
         return subprocess.run(
             [sys.executable, "-m", "vcompress",
-             str(self.root / src_name), str(self.root / "garbage.mp4"),
+             *[str(self.root / v) for v in videos],
              "--config", str(self.root / "config.toml"), *extra],
             cwd=str(helpers.ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=300,
@@ -151,10 +169,56 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(codecs, {"av1", "aac"})
 
     def test_b_rerun_skips_via_tag_even_with_force(self):
-        r = self.run_vcompress("--force", src_name="src.mkv")
+        r = self.run_vcompress("--force", videos=("src.mkv", "garbage.mp4"))
         self.assertIn("[skip] src.mkv", r.stdout)
         self.assertIn("already processed", r.stdout)
+
+    def test_c_keep_flag_preserves_originals(self):
+        r = self.run_vcompress("--no-adaptive", "--keep",
+                               videos=("keep_src.mp4",))
+        self.assertEqual(r.returncode, 0)
+        self.assertIn("[ok] keep_src.mp4", r.stdout)
+        self.assertIn("original kept", r.stdout)
+        self.assertTrue((self.root / "keep_src.mp4").exists(),
+                        "original must survive in keep mode")
+        self.assertTrue((self.root / "keep_src.mkv").exists())
+
+        records = [
+            json.loads(line)
+            for line in (self.root / "results.jsonl")
+            .read_text(encoding="utf-8").strip().splitlines()
+        ]
+        rec = next(x for x in records
+                   if x["action"] == "ok" and "keep_src" in x["path"])
+        self.assertTrue(rec["kept"])
+
+    def test_d_keep_same_extension_names_by_encoder(self):
+        original = self.root / "same_ext.mkv"
+        before = original.stat().st_size
+        r = self.run_vcompress("--no-adaptive", "--keep",
+                               videos=("same_ext.mkv",))
+        self.assertEqual(r.returncode, 0)
+        renamed = self.root / "same_ext.av1.mkv"
+        self.assertTrue(renamed.exists())
+        self.assertFalse((self.root / "same_ext.compressed.mkv").exists())
+        IntegrationTests.prev_output_size = renamed.stat().st_size
+        self.assertTrue(original.exists())
+        self.assertEqual(original.stat().st_size, before,
+                         "original must not be overwritten by same-name output")
+
+    def test_e_keep_collision_fails_instead_of_overwriting(self):
+        r = self.run_vcompress("--no-adaptive", "--keep", "--force",
+                               videos=("same_ext.mkv",))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("[fail] same_ext.mkv", r.stdout)
+        self.assertIn("already exists", r.stdout)
+        prev = self.root / "same_ext.av1.mkv"
+        self.assertTrue(prev.exists(), "previous output must not be touched")
+        self.assertEqual(prev.stat().st_size, IntegrationTests.prev_output_size,
+                         "previous output content must be unchanged")
+        self.assertEqual(list(self.root.glob("*.tmp.mkv")), [])
 
 
 if __name__ == "__main__":
     unittest.main()
+
