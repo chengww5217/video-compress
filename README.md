@@ -61,6 +61,9 @@ python -m vcompress D:\videos
 
 # 3. 只处理单个或多个文件
 python -m vcompress "D:\movies\a.mkv" "D:\movies\b.mp4"
+
+# 4. 只压缩、保留原文件（输出为 a.av1.mkv 这类副本）
+python -m vcompress D:\videos --keep
 ```
 
 > 新安装 Python 后需**重开终端**才能使用 `python` 命令。
