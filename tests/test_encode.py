@@ -100,6 +100,53 @@ class ParseProgressTests(unittest.TestCase):
         self.assertIsNone(encode._parse_speed("frame=60"))
 
 
+class RunEncodeStderrTests(unittest.TestCase):
+    """子进程往 stderr 猛写时 run_encode 不能卡死（旧实现会死锁）。"""
+
+    def run_in_thread(self, cmd, timeout=60):
+        import threading
+
+        result = {}
+
+        def target():
+            try:
+                encode.run_encode(cmd, 1.0, None)
+                result["ok"] = True
+            except BaseException as e:  # noqa: BLE001 - 测试里要看到任何异常
+                result["err"] = e
+
+        t = threading.Thread(target=target, daemon=True)
+        t.start()
+        t.join(timeout)
+        if t.is_alive():
+            encode.terminate_all()
+            t.join(10)
+            self.fail(f"run_encode did not finish within {timeout}s (deadlock)")
+        return result
+
+    def test_chatty_stderr_does_not_deadlock(self):
+        script = (
+            "import sys\n"
+            "for i in range(3000):\n"
+            "    sys.stderr.write('warn %d ' % i + 'x' * 100 + '\\n')\n"
+            "sys.stdout.write('out_time_us=1000000\\n')\n"
+        )
+        res = self.run_in_thread([sys.executable, "-u", "-c", script])
+        self.assertTrue(res.get("ok"), res.get("err"))
+
+    def test_failure_keeps_stderr_tail(self):
+        script = (
+            "import sys\n"
+            "sys.stderr.write('boom: invalid data found\\n')\n"
+            "sys.exit(3)\n"
+        )
+        res = self.run_in_thread([sys.executable, "-u", "-c", script])
+        err = res.get("err")
+        self.assertIsInstance(err, encode.EncodeError)
+        self.assertIn("exited 3", str(err))
+        self.assertIn("boom", str(err))
+
+
 class AdaptiveFallbackTests(unittest.TestCase):
     def test_missing_binary_returns_none(self):
         import logging

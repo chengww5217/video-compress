@@ -1,3 +1,4 @@
+import collections
 import json
 import shlex
 import subprocess
@@ -8,6 +9,8 @@ from pathlib import Path
 
 _active_procs = set()
 _lock = threading.Lock()
+
+STDERR_TAIL_LINES = 200
 
 
 class EncodeError(RuntimeError):
@@ -105,6 +108,20 @@ def _parse_speed(line: str):
         return None
 
 
+def _drain(stream, sink) -> None:
+    """把子进程 stderr 持续读走，防止管道写满后双向阻塞。"""
+    try:
+        for line in stream:
+            sink.append(line)
+    except (OSError, ValueError):
+        pass
+    finally:
+        try:
+            stream.close()
+        except OSError:
+            pass
+
+
 def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
     proc = subprocess.Popen(
         cmd,
@@ -115,7 +132,12 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
         errors="replace",
     )
     register(proc)
-    err_tail = ""
+    # ffmpeg 的进度走 stdout，日志走 stderr；stderr 必须并行读，否则
+    # 告警较多的片源写满 64KB 管道后 ffmpeg 和本进程互相等死。
+    err_tail = collections.deque(maxlen=STDERR_TAIL_LINES)
+    err_thread = threading.Thread(target=_drain, args=(proc.stderr, err_tail),
+                                  daemon=True)
+    err_thread.start()
     start = time.monotonic()
     last_time = start
     last_pos = 0.0
@@ -140,7 +162,6 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
                     progress_cb(pct, eta, last_speed)
                 else:
                     progress_cb(None, pos, last_speed)
-        err_tail = proc.stderr.read()[-2000:]
         rc = proc.wait()
     except BaseException:
         try:
@@ -150,8 +171,14 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
         raise
     finally:
         unregister(proc)
+        err_thread.join(timeout=5)
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
     if rc != 0:
-        raise EncodeError(f"ffmpeg exited {rc}: {err_tail.strip()[-500:]}")
+        tail = "".join(err_tail).strip()[-500:]
+        raise EncodeError(f"ffmpeg exited {rc}: {tail}")
 
 
 def _run_quiet(cmd: list) -> tuple:
