@@ -133,6 +133,7 @@ def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
 def process_file(ctx: Ctx, src: Path):
     store = ctx.store
     show = ctx.show_progress
+    line_open = [False]
 
     def progress(pct, info_val=0.0, speed=0.0):
         if not show:
@@ -146,6 +147,14 @@ def process_file(ctx: Ctx, src: Path):
             text = f"\r  {pct:5.1f}%  {eta}  {spd:>7}  {name:<36}"
         sys.stdout.write(text)
         sys.stdout.flush()
+        line_open[0] = True
+
+    def end_progress():
+        """收尾进度行，避免后面的日志直接粘在 \\r 行尾。"""
+        if line_open[0]:
+            sys.stdout.write("\n")
+            sys.stdout.flush()
+            line_open[0] = False
 
     try:
         info = probe.probe(ctx.tools, src)
@@ -192,14 +201,12 @@ def process_file(ctx: Ctx, src: Path):
             ctx.cfg["skip"]["tag_marker"] + "-v1",
         )
         log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
-        if show:
-            progress(0.0)
+        progress(0.0)
         t0 = time.monotonic()
         encode.run_encode(cmd, info.duration, progress)
         elapsed = time.monotonic() - t0
-        if show:
-            progress(100.0)
-            print()
+        progress(100.0)
+        end_progress()
 
         out_info = probe.probe(ctx.tools, tmp)
 
@@ -246,6 +253,7 @@ def process_file(ctx: Ctx, src: Path):
         return "ok"
 
     except Exception as e:
+        end_progress()
         if encode.is_cancelled():
             log.info(f"[abort] {src.name}: interrupted")
             _remove_tmp(tmp)
@@ -360,7 +368,6 @@ def main():
     ctx.recycle = args.recycle or run_cfg.get("use_recycle_bin", False)
     ctx.keep = args.keep or run_cfg.get("keep_original", False)
     workers = args.workers or int(run_cfg.get("workers", 1))
-    ctx.show_progress = workers == 1 and not args.dry_run
 
     todo = []
     for f in files:
@@ -371,12 +378,16 @@ def main():
             continue
         todo.append(f)
 
+    # 只有真正串行执行时进度条才不会被别的文件的输出打断
+    serial = workers <= 1 or len(todo) == 1
+    ctx.show_progress = serial and not ctx.dry_run
+
     if not ctx.dry_run:
         clean_stale_tmp(todo, ".tmp" + cfg["encode"]["output_container"])
 
     counts = {"ok": 0, "skipped": 0, "failed": 0, "dryrun": 0, "aborted": 0}
     try:
-        if workers <= 1 or len(todo) == 1:
+        if serial:
             for f in todo:
                 counts[process_file(ctx, f)] += 1
         else:

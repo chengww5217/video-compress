@@ -379,6 +379,22 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("relpath",
                       results.read_text(encoding="utf-8"))
 
+    def test_k_single_file_keeps_the_progress_bar_with_high_workers(self):
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = self.root / "progress.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", str(src)],
+            check=True, capture_output=True, timeout=120,
+        )
+        r = self.run_vcompress("--no-adaptive", "--workers", "4",
+                              videos=("progress.mp4",))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("100.0%", r.stdout,
+                      "a single file runs serially, so it must show progress")
+
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
         slow_cfg = self.root / "slow.toml"
