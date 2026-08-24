@@ -4,13 +4,29 @@ from pathlib import Path
 from . import encode
 
 
+def _to_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def decode_errors(ffmpeg: str, path: Path):
     rc, _out, err = encode.run_managed(
         [ffmpeg, "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"]
     )
     errs = [ln for ln in err.splitlines() if ln.strip()]
-    if rc != 0 or errs:
+    if errs:
         return errs[:10]
+    if rc != 0:
+        return [f"decode exited {rc} without printing a diagnostic"]
     return None
 
 
@@ -33,11 +49,16 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
 
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     cfg, log=None):
-    if not cfg["verify"].get("vmaf_enabled", True):
-        return None, "disabled"
-    segments = int(cfg["verify"].get("vmaf_segments", 3))
-    seconds = float(cfg["verify"].get("vmaf_sample_seconds", 20))
-    threshold = float(cfg["verify"].get("vmaf_threshold", 93.0))
+    vcfg = cfg["verify"]
+    if not vcfg.get("vmaf_enabled", True):
+        return None, ""
+    segments = max(1, _to_int(vcfg.get("vmaf_segments", 3), 3))
+    seconds = _to_float(vcfg.get("vmaf_sample_seconds", 20), 20.0)
+    threshold = _to_float(vcfg.get("vmaf_threshold", 93.0), 93.0)
+    if seconds <= 0:
+        seconds = 20.0
+    if duration <= 0:
+        return None, "unknown duration, cannot pick sample points"
 
     scores = []
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
@@ -54,9 +75,13 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                 encode.extract_segment(tools.ffmpeg, compressed, start,
                                        seconds, dist)
                 score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+                if log:
+                    log.debug(f"vmaf segment {i + 1} at {start:.1f}s: {score:.2f}")
                 scores.append(score)
             except encode.EncodeError as e:
                 return None, str(e)
+    if not scores:
+        return None, "no vmaf segment could be measured"
     mean = sum(scores) / len(scores)
     if mean < threshold:
         return mean, (

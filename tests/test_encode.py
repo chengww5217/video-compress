@@ -226,6 +226,28 @@ class RunEncodeStderrTests(unittest.TestCase):
         self.assertIn("boom", str(err))
 
 
+class PooledMeanTests(unittest.TestCase):
+    def test_vmaf_metric(self):
+        data = {"pooled_metrics": {"vmaf": {"mean": 95.5, "min": 80}}}
+        self.assertAlmostEqual(encode._pooled_mean(data), 95.5)
+
+    def test_falls_back_to_the_only_metric(self):
+        data = {"pooled_metrics": {"float_ssim": {"mean": 0.98}}}
+        self.assertAlmostEqual(encode._pooled_mean(data), 0.98)
+
+    def test_missing_pooled_metrics_raises(self):
+        with self.assertRaises(encode.EncodeError):
+            encode._pooled_mean({})
+
+    def test_missing_mean_raises(self):
+        with self.assertRaises(encode.EncodeError):
+            encode._pooled_mean({"pooled_metrics": {"vmaf": {"min": 1}}})
+
+    def test_non_numeric_mean_raises(self):
+        with self.assertRaises(encode.EncodeError):
+            encode._pooled_mean({"pooled_metrics": {"vmaf": {"mean": "n/a"}}})
+
+
 class SegmentCmdTests(unittest.TestCase):
     def cmd(self, start, seconds=5.0):
         return encode.segment_cmd("ffmpeg", Path("in.mkv"), start, seconds,

@@ -221,6 +221,8 @@ def process_file(ctx: Ctx, src: Path):
 
         score, msg = verify.vmaf_spot_check(ctx.tools, src, tmp,
                                             info.duration, ctx.cfg, log=log)
+        if score is not None:
+            log.info(f"[verify] {src.name}: vmaf {score:.2f}")
         if msg and score is None:
             log.warning(f"{src.name}: vmaf check unavailable ({msg}); proceeding")
         elif msg:

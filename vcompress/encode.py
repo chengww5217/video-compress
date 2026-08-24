@@ -319,6 +319,21 @@ def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path
         raise EncodeError(f"sample encode failed at crf={crf}: {err.strip()[-300:]}")
 
 
+def _pooled_mean(data: dict) -> float:
+    """从 libvmaf 的 json 里取平均分，结构不对时报明确错误。"""
+    pooled = data.get("pooled_metrics") or {}
+    entry = pooled.get("vmaf")
+    if not isinstance(entry, dict):
+        entry = next((v for v in pooled.values() if isinstance(v, dict)), {})
+    mean = entry.get("mean")
+    if mean is None:
+        raise EncodeError("libvmaf output has no pooled mean score")
+    try:
+        return float(mean)
+    except (TypeError, ValueError) as e:
+        raise EncodeError(f"libvmaf mean score is not a number: {mean!r}") from e
+
+
 def vmaf_score(ffmpeg: str, distorted: Path, reference: Path):
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         log_path = Path(td) / "vmaf.json"
@@ -332,10 +347,11 @@ def vmaf_score(ffmpeg: str, distorted: Path, reference: Path):
         rc, _out, err = run_managed(cmd, cwd=td)
         if rc != 0:
             raise EncodeError(f"libvmaf failed: {err.strip()[-300:]}")
-        data = json.loads(log_path.read_text(encoding="utf-8"))
-        pooled = data.get("pooled_metrics", {})
-        vmaf = pooled.get("vmaf") or next(iter(pooled.values()), {})
-        return float(vmaf.get("mean"))
+        try:
+            data = json.loads(log_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise EncodeError(f"cannot read libvmaf output: {e}") from e
+        return _pooled_mean(data)
 
 
 def pick_crf_adaptive(tools, src: Path, duration: float,
