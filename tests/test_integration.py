@@ -21,6 +21,7 @@ ffprobe = ""
 
 [skip]
 min_size_mb = 0
+min_saving_ratio = 0.10
 extensions = [".mp4", ".mkv"]
 tag_marker = "vcompress"
 
@@ -29,8 +30,6 @@ h264 = 0.05
 
 [skip.expected_ratio]
 h264 = 0.55
-
-min_saving_ratio = 0.10
 
 [encode]
 encoder = "av1"

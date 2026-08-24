@@ -4,6 +4,7 @@ ffprobe = ""
 
 [skip]
 min_size_mb = 20
+min_saving_ratio = 0.15
 extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"]
 tag_marker = "vcompress"
 
@@ -24,8 +25,6 @@ mpeg2video = 0.40
 mpeg4 = 0.45
 flv1 = 0.45
 wmv3 = 0.50
-
-min_saving_ratio = 0.15
 
 [encode]
 encoder = "av1"
