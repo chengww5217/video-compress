@@ -3,9 +3,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import json
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -264,6 +266,61 @@ class IntegrationTests(unittest.TestCase):
             capture_output=True, text=True, timeout=60,
         )
         return r.stdout.strip()
+
+
+    def test_g_sigint_kills_all_workers_promptly(self):
+        # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
+        slow_cfg = self.root / "slow.toml"
+        slow_cfg.write_text(
+            (self.root / "config.toml").read_text(encoding="utf-8")
+            .replace('preset = "8"', 'preset = "2"')
+            .replace(f"{self.root.as_posix()}/results.jsonl",
+                     f"{self.root.as_posix()}/slow-results.jsonl"),
+            encoding="utf-8",
+        )
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        names = ["slow1.mp4", "slow2.mp4"]
+        for n in names:
+            subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i",
+                 "testsrc2=duration=20:size=640x360:rate=30",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+                 "-pix_fmt", "yuv420p", str(self.root / n)],
+                check=True, capture_output=True, timeout=180,
+            )
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "vcompress",
+             *[str(self.root / n) for n in names],
+             "--config", str(slow_cfg), "--no-adaptive", "--workers", "2"],
+            cwd=str(helpers.ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace",
+        )
+        deadline = time.monotonic() + 60
+        try:
+            time.sleep(8)
+            self.assertIsNone(proc.poll(), "encode finished before SIGINT")
+            proc.send_signal(signal.SIGINT)
+            try:
+                out = proc.communicate(timeout=max(5, deadline - time.monotonic()))[0]
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                self.fail("SIGINT did not stop the run: workers were not killed")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self.assertEqual(proc.returncode, 130, out)
+        self.assertIn("interrupted", out)
+        self.assertEqual(list(self.root.glob("slow*.tmp.mkv")), [],
+                         "partial temp files must be removed on interrupt")
+        for n in names:
+            self.assertTrue((self.root / n).exists(),
+                            "originals must survive an interrupt")
 
 
 if __name__ == "__main__":

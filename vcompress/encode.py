@@ -9,6 +9,7 @@ from pathlib import Path
 
 _active_procs = set()
 _lock = threading.Lock()
+_cancelled = threading.Event()
 
 STDERR_TAIL_LINES = 200
 
@@ -28,6 +29,8 @@ def unregister(proc):
 
 
 def terminate_all():
+    """立即杀掉所有在跑的 ffmpeg，并置上取消标志。"""
+    _cancelled.set()
     with _lock:
         procs = list(_active_procs)
     for p in procs:
@@ -35,6 +38,40 @@ def terminate_all():
             p.kill()
         except OSError:
             pass
+
+
+def is_cancelled() -> bool:
+    return _cancelled.is_set()
+
+
+def clear_cancel():
+    _cancelled.clear()
+
+
+def run_managed(cmd: list, cwd=None) -> tuple:
+    """跑一个短命 ffmpeg 子进程，注册后可被 terminate_all 立刻杀掉。"""
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        cwd=cwd,
+    )
+    register(proc)
+    try:
+        out, err = proc.communicate()
+    except BaseException:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        proc.communicate()
+        raise
+    finally:
+        unregister(proc)
+    return proc.returncode, out, err
 
 
 def audio_args(info, cfg) -> list:
@@ -182,10 +219,8 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
 
 
 def _run_quiet(cmd: list) -> tuple:
-    r = subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace"
-    )
-    return r.returncode, r.stderr
+    rc, _out, err = run_managed(cmd)
+    return rc, err
 
 
 def extract_reference_segment(ffmpeg: str, src: Path, start: float,
@@ -226,12 +261,9 @@ def vmaf_score(ffmpeg: str, distorted: Path, reference: Path):
             "-lavfi", "libvmaf=log_path=vmaf.json:log_fmt=json",
             "-f", "null", "-",
         ]
-        r = subprocess.run(
-            cmd, capture_output=True, text=True,
-            encoding="utf-8", errors="replace", cwd=td,
-        )
-        if r.returncode != 0:
-            raise EncodeError(f"libvmaf failed: {r.stderr.strip()[-300:]}")
+        rc, _out, err = run_managed(cmd, cwd=td)
+        if rc != 0:
+            raise EncodeError(f"libvmaf failed: {err.strip()[-300:]}")
         data = json.loads(log_path.read_text(encoding="utf-8"))
         pooled = data.get("pooled_metrics", {})
         vmaf = pooled.get("vmaf") or next(iter(pooled.values()), {})

@@ -245,15 +245,23 @@ def process_file(ctx: Ctx, src: Path):
         return "ok"
 
     except Exception as e:
+        if encode.is_cancelled():
+            log.info(f"[abort] {src.name}: interrupted")
+            _remove_tmp(tmp)
+            return "aborted"
         log.error(f"[fail] {src.name}: {e}")
         store.add("failed", info, stage="process", error=str(e)[:500])
-        if tmp.exists():
-            try:
-                tmp.unlink()
-                log.info(f"cleaned temp file: {tmp.name}")
-            except OSError:
-                pass
+        _remove_tmp(tmp)
         return "failed"
+
+
+def _remove_tmp(tmp: Path):
+    if tmp.exists():
+        try:
+            tmp.unlink()
+            log.info(f"cleaned temp file: {tmp.name}")
+        except OSError:
+            pass
 
 
 def _trash(path: Path):
@@ -315,6 +323,7 @@ def main():
     cfg = load_config(Path(args.config))
     run_cfg = cfg["run"]
     setup_logging(run_cfg["log_file"])
+    encode.clear_cancel()
     if args.encoder:
         cfg["encode"]["encoder"] = args.encoder
     encoder = cfg["encode"]["encoder"]
@@ -356,19 +365,27 @@ def main():
     if not ctx.dry_run:
         clean_stale_tmp(todo, ".tmp" + cfg["encode"]["output_container"])
 
-    counts = {"ok": 0, "skipped": 0, "failed": 0, "dryrun": 0}
+    counts = {"ok": 0, "skipped": 0, "failed": 0, "dryrun": 0, "aborted": 0}
     try:
         if workers <= 1 or len(todo) == 1:
             for f in todo:
                 counts[process_file(ctx, f)] += 1
         else:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
+            # 不能用 with：KeyboardInterrupt 会先触发 shutdown(wait=True)，
+            # 卡在等编码结束上，terminate_all 永远排不到。
+            ex = ThreadPoolExecutor(max_workers=workers)
+            try:
                 futures = {ex.submit(process_file, ctx, f): f for f in todo}
                 for fut in as_completed(futures):
                     counts[fut.result()] += 1
+            except BaseException:
+                encode.terminate_all()
+                ex.shutdown(wait=False, cancel_futures=True)
+                raise
+            ex.shutdown(wait=True)
     except KeyboardInterrupt:
         encode.terminate_all()
-        log.warning("interrupted; temp files cleaned up on next run")
+        log.warning("interrupted; partial outputs removed")
         return 130
 
     total_saved = 0
@@ -379,6 +396,7 @@ def main():
         f"done: {counts['ok']} compressed, {counts['skipped']} skipped, "
         f"{counts['failed']} failed"
         + (f", {counts['dryrun']} dry-run" if counts["dryrun"] else "")
+        + (f", {counts['aborted']} aborted" if counts["aborted"] else "")
     )
     if counts["ok"]:
         log.info(f"session savings: see {store_path}")

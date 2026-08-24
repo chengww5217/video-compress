@@ -1,4 +1,3 @@
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -6,12 +5,11 @@ from . import encode
 
 
 def decode_errors(ffmpeg: str, path: Path):
-    r = subprocess.run(
-        [ffmpeg, "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"],
-        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    rc, _out, err = encode.run_managed(
+        [ffmpeg, "-hide_banner", "-v", "error", "-i", str(path), "-f", "null", "-"]
     )
-    errs = [ln for ln in r.stderr.splitlines() if ln.strip()]
-    if r.returncode != 0 or errs:
+    errs = [ln for ln in err.splitlines() if ln.strip()]
+    if rc != 0 or errs:
         return errs[:10]
     return None
 
@@ -43,10 +41,9 @@ def _normalized_segment(ffmpeg: str, src: Path, start: float, seconds: float,
         "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast",
         str(out),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        raise encode.EncodeError(f"segment extract failed: {r.stderr.strip()[-300:]}")
+    rc, _out, err = encode.run_managed(cmd)
+    if rc != 0:
+        raise encode.EncodeError(f"segment extract failed: {err.strip()[-300:]}")
 
 
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
