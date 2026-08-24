@@ -188,6 +188,7 @@ def process_file(ctx: Ctx, src: Path):
         cmd = encode.build_cmd(
             ctx.tools.ffmpeg, src, tmp, enc_cfg, crf,
             encode.audio_args(info, ctx.cfg),
+            encode.subtitle_args(info, out_ext),
             ctx.cfg["skip"]["tag_marker"] + "-v1",
         )
         log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")

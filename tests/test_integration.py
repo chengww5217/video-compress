@@ -138,6 +138,24 @@ class IntegrationTests(unittest.TestCase):
             check=True, capture_output=True, timeout=120,
         )
 
+        # tricky.mp4 同时带 tmcd 数据流和 mov_text 字幕，两者都装不进 mkv
+        (cls.root / "sub.srt").write_text(
+            "1\n00:00:00,500 --> 00:00:01,500\nhello world\n\n",
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
+             "-i", str(cls.root / "sub.srt"),
+             "-map", "0:v", "-map", "1:a", "-map", "2:s",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", "-c:a", "aac", "-c:s", "mov_text",
+             "-timecode", "00:00:00:00",
+             str(cls.root / "tricky.mp4")],
+            check=True, capture_output=True, timeout=120,
+        )
+
     @classmethod
     def tearDownClass(cls):
         import shutil
@@ -267,6 +285,28 @@ class IntegrationTests(unittest.TestCase):
         )
         return r.stdout.strip()
 
+
+    def test_h_data_stream_and_mov_text_survive_the_container_switch(self):
+        r = self.run_vcompress("--no-adaptive", videos=("tricky.mp4",))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("[ok] tricky.mp4", r.stdout)
+        out = self.root / "tricky.mkv"
+        self.assertTrue(out.exists())
+
+        fp = Tools({"ffmpeg": "", "ffprobe": ""}).ffprobe
+        pr = subprocess.run(
+            [fp, "-v", "error", "-show_entries",
+             "stream=codec_type,codec_name", "-of", "json", str(out)],
+            capture_output=True, text=True, timeout=60,
+        )
+        streams = json.loads(pr.stdout)["streams"]
+        kinds = [s["codec_type"] for s in streams]
+        codecs = [s.get("codec_name") for s in streams]
+        self.assertIn("av1", codecs)
+        self.assertIn("aac", codecs)
+        self.assertIn("subrip", codecs, "mov_text should be converted to srt")
+        self.assertNotIn("data", kinds, "tmcd data stream must be dropped")
+        self.assertEqual(kinds.count("subtitle"), 1)
 
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码

@@ -57,24 +57,72 @@ class VideoArgsTests(unittest.TestCase):
         ])
 
 
+class SubtitleArgsTests(unittest.TestCase):
+    def test_no_subtitles_empty(self):
+        self.assertEqual(encode.subtitle_args(make_info(), ".mkv"), [])
+
+    def test_mov_text_converted_for_mkv(self):
+        info = make_info(subtitle_codecs=["mov_text"])
+        self.assertEqual(encode.subtitle_args(info, ".mkv"), ["-c:s:0", "srt"])
+
+    def test_graphic_subs_copied_for_mkv(self):
+        info = make_info(subtitle_codecs=["hdmv_pgs_subtitle", "dvd_subtitle"])
+        self.assertEqual(encode.subtitle_args(info, ".mkv"),
+                         ["-c:s:0", "copy", "-c:s:1", "copy"])
+
+    def test_mixed_streams_decided_individually(self):
+        info = make_info(subtitle_codecs=["mov_text", "hdmv_pgs_subtitle"])
+        self.assertEqual(encode.subtitle_args(info, ".mkv"),
+                         ["-c:s:0", "srt", "-c:s:1", "copy"])
+
+    def test_text_subs_converted_for_mp4(self):
+        info = make_info(subtitle_codecs=["subrip", "ass"])
+        self.assertEqual(encode.subtitle_args(info, ".mp4"),
+                         ["-c:s:0", "mov_text", "-c:s:1", "mov_text"])
+
+    def test_srt_copied_as_is_for_mkv(self):
+        info = make_info(subtitle_codecs=["subrip"])
+        self.assertEqual(encode.subtitle_args(info, ".mkv"), ["-c:s:0", "copy"])
+
+
 class BuildCmdTests(unittest.TestCase):
-    def test_command_structure(self):
+    def build(self, dst_name, s_args=None):
         cfg = make_cfg()
-        src = Path("in.mp4")
-        dst = Path("out.tmp.mkv")
-        cmd = encode.build_cmd("ffmpeg.exe", src, dst,
-                               cfg["encode"]["av1"], 27,
-                               ["-c:a", "copy"], "vcompress-v1")
+        return encode.build_cmd("ffmpeg.exe", Path("in.mp4"), Path(dst_name),
+                                cfg["encode"]["av1"], 27, ["-c:a", "copy"],
+                                s_args or [], "vcompress-v1")
+
+    def test_command_structure(self):
+        cmd = self.build("out.tmp.mkv", ["-c:s:0", "srt"])
         self.assertEqual(cmd[0], "ffmpeg.exe")
-        self.assertIn(str(src), cmd)
+        self.assertIn("in.mp4", cmd)
         self.assertIn("0:V", cmd)
         self.assertIn("-map_metadata", cmd)
         self.assertIn("-map_chapters", cmd)
         self.assertIn("comment=vcompress-v1", cmd)
         self.assertIn("-crf", cmd)
         self.assertIn("27", cmd)
-        self.assertIn("-c:s", cmd)
-        self.assertEqual(cmd[-1], str(dst))
+        self.assertIn("-c:s:0", cmd)
+        self.assertEqual(cmd[-1], "out.tmp.mkv")
+
+    def test_mkv_drops_data_streams_and_keeps_attachments(self):
+        cmd = self.build("out.tmp.mkv")
+        self.assertIn("-dn", cmd)
+        self.assertNotIn("0:d?", cmd)
+        self.assertNotIn("-c:d", cmd)
+        self.assertIn("0:t?", cmd)
+        self.assertIn("-c:t", cmd)
+
+    def test_mkv_has_no_mov_only_flags(self):
+        self.assertNotIn("-movflags", self.build("out.tmp.mkv"))
+
+    def test_mp4_keeps_data_streams_and_movflags(self):
+        cmd = self.build("out.tmp.mp4")
+        self.assertIn("0:d?", cmd)
+        self.assertIn("-c:d", cmd)
+        self.assertIn("-movflags", cmd)
+        self.assertNotIn("-dn", cmd)
+        self.assertNotIn("0:t?", cmd)
 
 
 class ParseProgressTests(unittest.TestCase):

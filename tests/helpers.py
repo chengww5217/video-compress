@@ -70,6 +70,7 @@ def make_info(**kw):
         tagged=False,
         audio_codecs=["aac"],
         audio_bitrates=[192_000],
+        subtitle_codecs=[],
     )
     base.update(kw)
     return VideoInfo(**base)

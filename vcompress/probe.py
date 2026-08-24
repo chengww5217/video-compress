@@ -72,6 +72,7 @@ class VideoInfo:
     tagged: bool = False
     audio_codecs: list = field(default_factory=list)
     audio_bitrates: list = field(default_factory=list)
+    subtitle_codecs: list = field(default_factory=list)
 
 
 def _to_int(v, default=0):
@@ -109,6 +110,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     streams = data.get("streams", [])
     vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
     astreams = [s for s in streams if s.get("codec_type") == "audio"]
+    sstreams = [s for s in streams if s.get("codec_type") == "subtitle"]
 
     info = VideoInfo(path=path, container=path.suffix.lower())
     info.video_codec = vstream.get("codec_name", "")
@@ -125,6 +127,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.tagged = "vcompress" in comment.lower()
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
     info.audio_bitrates = [_to_int(s.get("bit_rate")) for s in astreams]
+    info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
     return info
 
 

@@ -91,6 +91,30 @@ def audio_args(info, cfg) -> list:
     return ["-c:a", "copy"]
 
 
+MKV_LIKE = {".mkv", ".webm"}
+MP4_LIKE = {".mp4", ".m4v", ".mov"}
+# matroska 不认 mp4 系的文本字幕，mp4 只认 mov_text，跨容器复制会直接失败
+MP4_TEXT_SUBS = {"mov_text", "tx3g"}
+MKV_TEXT_SUBS = {"subrip", "srt", "ass", "ssa", "webvtt", "text", "subviewer"}
+
+
+def subtitle_args(info, container: str) -> list:
+    """逐条字幕决定 copy 还是按目标容器转换文本字幕。"""
+    if not info.subtitle_codecs:
+        return []
+    container = (container or "").lower()
+    args = []
+    for i, codec in enumerate(info.subtitle_codecs):
+        codec = (codec or "").lower()
+        if container in MKV_LIKE and codec in MP4_TEXT_SUBS:
+            args += [f"-c:s:{i}", "srt"]
+        elif container in MP4_LIKE and codec in MKV_TEXT_SUBS:
+            args += [f"-c:s:{i}", "mov_text"]
+        else:
+            args += [f"-c:s:{i}", "copy"]
+    return args
+
+
 def video_args(encoder_cfg: dict, crf: int) -> list:
     args = [
         "-c:v", encoder_cfg["codec"],
@@ -104,19 +128,31 @@ def video_args(encoder_cfg: dict, crf: int) -> list:
 
 
 def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
-              crf: int, a_args: list, marker: str) -> list:
+              crf: int, a_args: list, s_args: list, marker: str) -> list:
+    container = dst.suffix.lower()
+    maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
+    tail = []
+    if container in MKV_LIKE:
+        # 附件只有 matroska 支持；data 流（如 mp4 的 tmcd 时间码）装不进去，
+        # 硬塞会让整个转码失败，只能显式丢弃。
+        maps += ["-map", "0:t?"]
+        tail += ["-c:t", "copy", "-dn"]
+    else:
+        maps += ["-map", "0:d?"]
+        tail += ["-c:d", "copy"]
+    if container in MP4_LIKE:
+        tail += ["-movflags", "+use_metadata_tags"]
     return [
         ffmpeg, "-hide_banner", "-y",
         "-i", str(src),
-        "-map", "0:V", "-map", "0:a?", "-map", "0:s?",
-        "-map", "0:t?", "-map", "0:d?",
+        *maps,
         "-map_metadata", "0",
         "-map_chapters", "0",
         *video_args(encoder_cfg, crf),
         *a_args,
-        "-c:s", "copy", "-c:t", "copy", "-c:d", "copy",
+        *s_args,
+        *tail,
         "-metadata", f"comment={marker}",
-        "-movflags", "+use_metadata_tags",
         "-progress", "pipe:1", "-nostats",
         str(dst),
     ]
