@@ -6,7 +6,7 @@ import unittest
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.probe import _parse_fps, _to_int, should_skip
+from vcompress.probe import (_parse_fps, _stream_bitrate, _to_int, should_skip)
 
 
 class ParseHelperTests(unittest.TestCase):
@@ -25,6 +25,46 @@ class ParseHelperTests(unittest.TestCase):
         self.assertEqual(_to_int("12.9"), 12)
         self.assertEqual(_to_int(None, -1), -1)
         self.assertEqual(_to_int("not-a-number"), 0)
+
+
+class VideoBitrateTests(unittest.TestCase):
+    def test_stream_bitrate_preferred(self):
+        info = make_info(bitrate=6_000_000, container_bitrate=9_000_000)
+        self.assertEqual(info.video_bitrate(), 6_000_000)
+
+    def test_container_bitrate_minus_audio(self):
+        info = make_info(bitrate=0, container_bitrate=9_000_000,
+                         audio_bitrates=[640_000, 192_000])
+        self.assertEqual(info.video_bitrate(), 9_000_000 - 832_000)
+
+    def test_container_only(self):
+        info = make_info(bitrate=0, container_bitrate=5_000_000,
+                         audio_codecs=[], audio_bitrates=[])
+        self.assertEqual(info.video_bitrate(), 5_000_000)
+
+    def test_absurd_audio_bitrate_falls_back_to_container(self):
+        info = make_info(bitrate=0, container_bitrate=1_000_000,
+                         audio_bitrates=[4_000_000])
+        self.assertEqual(info.video_bitrate(), 1_000_000)
+
+    def test_nothing_known(self):
+        info = make_info(bitrate=0, container_bitrate=0)
+        self.assertEqual(info.video_bitrate(), 0)
+
+
+class StreamBitrateTests(unittest.TestCase):
+    def test_bit_rate_field(self):
+        self.assertEqual(_stream_bitrate({"bit_rate": "5000000"}), 5_000_000)
+
+    def test_matroska_bps_tag(self):
+        self.assertEqual(_stream_bitrate({"tags": {"BPS": "4200000"}}), 4_200_000)
+
+    def test_language_suffixed_bps_tag(self):
+        self.assertEqual(_stream_bitrate({"tags": {"BPS-eng": "3000000"}}),
+                         3_000_000)
+
+    def test_no_bitrate_info(self):
+        self.assertEqual(_stream_bitrate({"tags": {"DURATION": "00:01:00"}}), 0)
 
 
 class ShouldSkipTests(unittest.TestCase):
@@ -93,6 +133,14 @@ class ShouldSkipTests(unittest.TestCase):
         info = make_info(bitrate=0)
         skip, reason = should_skip(info, self.cfg)
         self.assertFalse(skip, reason)
+
+    def test_fat_audio_track_does_not_hide_a_thin_video_track(self):
+        # 容器总码率 3.6M 看着够高，但其中 1.5M 是音轨，视频其实已压到位
+        info = make_info(bitrate=0, container_bitrate=3_600_000,
+                         audio_codecs=["truehd"], audio_bitrates=[1_500_000])
+        skip, reason = should_skip(info, self.cfg)
+        self.assertTrue(skip, "bpp gate must judge the video track alone")
+        self.assertIn("bits/pixel", reason)
 
 
 if __name__ == "__main__":

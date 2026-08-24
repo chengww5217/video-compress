@@ -64,6 +64,7 @@ def make_info(**kw):
         height=1080,
         fps=30.0,
         bitrate=6_000_000,
+        container_bitrate=0,
         duration=600.0,
         size=500_000_000,
         pix_fmt="yuv420p",

@@ -66,6 +66,7 @@ class VideoInfo:
     height: int = 0
     fps: float = 0.0
     bitrate: int = 0
+    container_bitrate: int = 0
     duration: float = 0.0
     size: int = 0
     pix_fmt: str = ""
@@ -74,6 +75,16 @@ class VideoInfo:
     audio_bitrates: list = field(default_factory=list)
     audio_channels: list = field(default_factory=list)
     subtitle_codecs: list = field(default_factory=list)
+
+    def video_bitrate(self) -> int:
+        """视频轨码率；容器没给的话用总码率扣掉音轨估算。"""
+        if self.bitrate > 0:
+            return self.bitrate
+        if self.container_bitrate > 0:
+            audio = sum(b for b in self.audio_bitrates if b)
+            rest = self.container_bitrate - audio
+            return rest if rest > 0 else self.container_bitrate
+        return 0
 
 
 def _to_int(v, default=0):
@@ -92,6 +103,14 @@ def _parse_fps(rate: str) -> float:
         return float(num) / den
     except (ValueError, AttributeError):
         return 0.0
+
+
+def _stream_bitrate(stream: dict) -> int:
+    """matroska 通常不给 bit_rate，退回它写的 BPS 统计标签。"""
+    tags = {k.lower(): v for k, v in (stream.get("tags") or {}).items()}
+    bps = next((v for k, v in tags.items() if k == "bps" or k.startswith("bps-")),
+               None)
+    return _to_int(stream.get("bit_rate")) or _to_int(bps)
 
 
 def probe(tools: Tools, path: Path) -> VideoInfo:
@@ -120,13 +139,14 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.height = _to_int(vstream.get("height"))
     info.fps = _parse_fps(vstream.get("r_frame_rate")) or _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")
-    info.bitrate = _to_int(vstream.get("bit_rate")) or _to_int(fmt.get("bit_rate"))
+    info.bitrate = _stream_bitrate(vstream)
+    info.container_bitrate = _to_int(fmt.get("bit_rate"))
     info.duration = float(fmt.get("duration") or vstream.get("duration") or 0)
     info.size = _to_int(fmt.get("size"), default=path.stat().st_size)
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
     info.comment = str(tags.get("comment") or tags.get("description") or "")
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
-    info.audio_bitrates = [_to_int(s.get("bit_rate")) for s in astreams]
+    info.audio_bitrates = [_stream_bitrate(s) for s in astreams]
     info.audio_channels = [_to_int(s.get("channels"), 2) for s in astreams]
     info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
     return info
@@ -145,8 +165,9 @@ def should_skip(info: VideoInfo, cfg: dict):
     if info.codec_family and info.codec_family in bpp_cfg:
         fps = info.fps if info.fps > 0 else 25.0
         pixels = info.width * info.height
-        if info.bitrate > 0 and pixels > 0:
-            bpp = info.bitrate / (pixels * fps)
+        vbr = info.video_bitrate()
+        if vbr > 0 and pixels > 0:
+            bpp = vbr / (pixels * fps)
             thr = float(bpp_cfg[info.codec_family])
             if bpp < thr:
                 return True, (
