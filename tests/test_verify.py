@@ -46,6 +46,33 @@ class CheckBasicTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("discarding", msg)
 
+    def test_dropped_audio_track_fails(self):
+        orig = make_info(duration=600.0, audio_codecs=["dts", "aac"],
+                         audio_bitrates=[1_500_000, 192_000],
+                         audio_channels=[6, 2])
+        out = make_info(video_codec="av1", duration=600.0,
+                        audio_codecs=["opus"], audio_bitrates=[480_000],
+                        audio_channels=[6])
+        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("audio stream count changed 2 -> 1", msg)
+
+    def test_dropped_subtitle_fails(self):
+        orig = make_info(duration=600.0, subtitle_codecs=["subrip", "ass"])
+        out = make_info(video_codec="av1", duration=600.0,
+                        subtitle_codecs=["subrip"])
+        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("subtitle stream count changed 2 -> 1", msg)
+
+    def test_converted_streams_with_same_count_pass(self):
+        orig = make_info(duration=600.0, audio_codecs=["flac"],
+                         subtitle_codecs=["mov_text"])
+        out = make_info(video_codec="av1", duration=600.0,
+                        audio_codecs=["opus"], subtitle_codecs=["subrip"])
+        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        self.assertTrue(ok, msg)
+
 
 class VmafSpotCheckTests(unittest.TestCase):
     """用替身挡掉 ffmpeg，只验证参数处理与结果判定。"""

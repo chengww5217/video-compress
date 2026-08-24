@@ -38,6 +38,13 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
             return False, f"duration mismatch {diff:.2f}s > {max_diff}s"
     if not out_info.video_codec:
         return False, "output has no video stream"
+    for kind, before, after in (
+        ("audio", len(orig_info.audio_codecs), len(out_info.audio_codecs)),
+        ("subtitle", len(orig_info.subtitle_codecs),
+         len(out_info.subtitle_codecs)),
+    ):
+        if before != after:
+            return False, f"{kind} stream count changed {before} -> {after}"
     if new_size >= orig_size:
         return False, f"output {new_size} bytes >= source {orig_size} bytes"
     min_saving = float(cfg["verify"].get("min_actual_saving", 0.05))
