@@ -31,21 +31,6 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
     return True, ""
 
 
-def _normalized_segment(ffmpeg: str, src: Path, start: float, seconds: float,
-                        out: Path):
-    cmd = [
-        ffmpeg, "-hide_banner", "-y",
-        "-i", str(src),
-        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
-        "-map", "0:v:0", "-an", "-sn", "-dn",
-        "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast",
-        str(out),
-    ]
-    rc, _out, err = encode.run_managed(cmd)
-    if rc != 0:
-        raise encode.EncodeError(f"segment extract failed: {err.strip()[-300:]}")
-
-
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     cfg, log=None):
     if not cfg["verify"].get("vmaf_enabled", True):
@@ -65,8 +50,9 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
             if log:
                 log.info(f"vmaf spot check: segment {i + 1}/{segments}")
             try:
-                _normalized_segment(tools.ffmpeg, orig, start, seconds, ref)
-                _normalized_segment(tools.ffmpeg, compressed, start, seconds, dist)
+                encode.extract_segment(tools.ffmpeg, orig, start, seconds, ref)
+                encode.extract_segment(tools.ffmpeg, compressed, start,
+                                       seconds, dist)
                 score = encode.vmaf_score(tools.ffmpeg, dist, ref)
                 scores.append(score)
             except encode.EncodeError as e:

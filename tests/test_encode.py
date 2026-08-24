@@ -226,6 +226,40 @@ class RunEncodeStderrTests(unittest.TestCase):
         self.assertIn("boom", str(err))
 
 
+class SegmentCmdTests(unittest.TestCase):
+    def cmd(self, start, seconds=5.0):
+        return encode.segment_cmd("ffmpeg", Path("in.mkv"), start, seconds,
+                                  Path("out.mkv"))
+
+    def seeks(self, cmd):
+        i = cmd.index("-i")
+        first = cmd.index("-ss")
+        self.assertLess(first, i, "coarse -ss must come before -i")
+        second = cmd.index("-ss", i)
+        return float(cmd[first + 1]), float(cmd[second + 1])
+
+    def test_two_stage_seek_adds_up_to_start(self):
+        pre, post = self.seeks(self.cmd(600.0))
+        self.assertAlmostEqual(pre + post, 600.0, places=3)
+        self.assertAlmostEqual(post, encode.SEEK_LEADIN_S, places=3)
+
+    def test_no_negative_seek_near_the_head(self):
+        pre, post = self.seeks(self.cmd(0.5))
+        self.assertEqual(pre, 0.0)
+        self.assertAlmostEqual(pre + post, 0.5, places=3)
+
+    def test_zero_start(self):
+        pre, post = self.seeks(self.cmd(0.0))
+        self.assertEqual((pre, post), (0.0, 0.0))
+
+    def test_segment_is_lossless_video_only(self):
+        cmd = self.cmd(10.0)
+        self.assertIn("-an", cmd)
+        self.assertIn("-sn", cmd)
+        self.assertIn("-dn", cmd)
+        self.assertEqual(cmd[cmd.index("-crf") + 1], "0")
+
+
 class AdaptiveFallbackTests(unittest.TestCase):
     def test_missing_binary_returns_none(self):
         import logging

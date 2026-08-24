@@ -276,19 +276,34 @@ def _run_quiet(cmd: list) -> tuple:
     return rc, err
 
 
-def extract_reference_segment(ffmpeg: str, src: Path, start: float,
-                              seconds: float, out: Path):
-    cmd = [
+SEEK_LEADIN_S = 2.0
+
+
+def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
+                out: Path) -> list:
+    """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确 seek 微调。
+
+    只用精确 seek（-ss 放在 -i 之后）要从文件开头解码，两小时的片子抽三段
+    就是三次近全片解码；只用快速 seek 会停在关键帧上，参考片段和待测片段
+    的关键帧位置不同就会错位，VMAF 直接失去意义。两段式两个问题都避开。
+    """
+    lead = min(SEEK_LEADIN_S, max(0.0, start))
+    return [
         ffmpeg, "-hide_banner", "-y",
+        "-ss", f"{max(0.0, start - lead):.3f}",
         "-i", str(src),
-        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
+        "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
         "-map", "0:v:0", "-an", "-sn", "-dn",
         "-c:v", "libx264", "-crf", "0", "-preset", "ultrafast",
         str(out),
     ]
-    rc, err = _run_quiet(cmd)
+
+
+def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
+                    out: Path):
+    rc, _out, err = run_managed(segment_cmd(ffmpeg, src, start, seconds, out))
     if rc != 0:
-        raise EncodeError(f"reference segment failed: {err.strip()[-300:]}")
+        raise EncodeError(f"segment extract failed: {err.strip()[-300:]}")
 
 
 def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path):
@@ -339,7 +354,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
     try:
         root = Path(tmpdir.name)
         ref = root / "ref.mkv"
-        extract_reference_segment(tools.ffmpeg, src, center, min(seconds, duration), ref)
+        extract_segment(tools.ffmpeg, src, center, min(seconds, duration), ref)
 
         while hi - lo > step:
             mid = (lo + hi) // 2

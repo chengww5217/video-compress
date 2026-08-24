@@ -395,6 +395,40 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("100.0%", r.stdout,
                       "a single file runs serially, so it must show progress")
 
+    def test_l_sampled_segments_stay_aligned_for_vmaf(self):
+        from vcompress import verify
+
+        tools = Tools({"ffmpeg": "", "ffprobe": ""})
+        filters = subprocess.run([tools.ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True, timeout=60)
+        if "libvmaf" not in filters.stdout:
+            self.skipTest("ffmpeg build has no libvmaf")
+
+        # 参考版几乎没有关键帧，压缩版每 5 帧一个：只用快速 seek 必然错位
+        ref = self.root / "align_ref.mp4"
+        dist = self.root / "align_dist.mkv"
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=12:size=320x180:rate=25",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "10",
+             "-g", "300", "-pix_fmt", "yuv420p", str(ref)],
+            check=True, capture_output=True, timeout=180,
+        )
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(ref), "-c:v", "libx264", "-preset", "ultrafast",
+             "-crf", "14", "-g", "5", "-pix_fmt", "yuv420p", str(dist)],
+            check=True, capture_output=True, timeout=180,
+        )
+
+        cfg = {"verify": {"vmaf_enabled": True, "vmaf_segments": 2,
+                          "vmaf_sample_seconds": 3.0, "vmaf_threshold": 90.0}}
+        mean, msg = verify.vmaf_spot_check(tools, ref, dist, 12.0, cfg)
+        self.assertIsNotNone(mean, msg)
+        self.assertGreater(mean, 90.0,
+                           "misaligned sampling would collapse the score")
+        self.assertEqual(msg, "")
+
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
         slow_cfg = self.root / "slow.toml"
