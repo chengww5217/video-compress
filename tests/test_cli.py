@@ -81,20 +81,43 @@ class GatherFilesTests(unittest.TestCase):
 
 
 class CleanStaleTmpTests(unittest.TestCase):
-    def test_removes_only_matching_tmp_files(self):
-        with tempfile.TemporaryDirectory() as td:
-            root = Path(td)
-            keep = root / "a.mp4"
-            keep.write_bytes(b"x")
-            stale = root / "b.tmp.mkv"
-            stale.write_bytes(b"x")
-            other = root / "c.tmp.txt"
-            other.write_bytes(b"x")
-            removed = clean_stale_tmp([keep], ".tmp.mkv")
-            self.assertEqual(removed, 1)
-            self.assertFalse(stale.exists())
-            self.assertTrue(other.exists())
-            self.assertTrue(keep.exists())
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def touch(self, name):
+        p = self.root / name
+        p.write_bytes(b"x")
+        return p
+
+    def test_removes_the_temp_file_of_a_pending_source(self):
+        src = self.touch("a.mp4")
+        stale = self.touch("a.tmp.mkv")
+        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 1)
+        self.assertFalse(stale.exists())
+        self.assertTrue(src.exists())
+
+    def test_keeps_temp_files_of_untouched_sources(self):
+        src = self.touch("a.mp4")
+        mine = self.touch("a.tmp.mkv")
+        someone_else = self.touch("holiday-footage.tmp.mkv")
+        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 1)
+        self.assertFalse(mine.exists())
+        self.assertTrue(someone_else.exists(),
+                        "unrelated .tmp.mkv files must be left alone")
+
+    def test_other_suffixes_untouched(self):
+        src = self.touch("a.mp4")
+        other = self.touch("a.tmp.txt")
+        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 0)
+        self.assertTrue(other.exists())
+
+    def test_nothing_to_clean(self):
+        src = self.touch("a.mp4")
+        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 0)
 
 
 class ResolveFinalPathTests(unittest.TestCase):

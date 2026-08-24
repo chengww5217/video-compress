@@ -83,16 +83,18 @@ def gather_files(paths, recursive: bool, extensions: set):
 
 
 def clean_stale_tmp(files, tmp_suffix: str):
-    parents = {f.parent for f in files}
+    """只清理待处理文件自己留下的临时文件，不碰目录里同后缀的其它文件。"""
     removed = 0
-    for d in parents:
-        for t in d.glob(f"*{tmp_suffix}"):
-            try:
-                t.unlink()
-                removed += 1
-                log.warning(f"removed stale temp file: {t.name}")
-            except OSError as e:
-                log.error(f"cannot remove stale temp {t}: {e}")
+    for f in files:
+        t = f.with_name(f.stem + tmp_suffix)
+        if not t.exists():
+            continue
+        try:
+            t.unlink()
+            removed += 1
+            log.warning(f"removed stale temp file: {t.name}")
+        except OSError as e:
+            log.error(f"cannot remove stale temp {t}: {e}")
     return removed
 
 
