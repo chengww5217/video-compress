@@ -8,7 +8,8 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.cli import ResultStore, clean_stale_tmp, gather_files
+from vcompress.cli import (ResultStore, clean_stale_tmp, gather_files,
+                           resolve_final_path)
 
 
 class ResultStoreTests(unittest.TestCase):
@@ -94,6 +95,52 @@ class CleanStaleTmpTests(unittest.TestCase):
             self.assertFalse(stale.exists())
             self.assertTrue(other.exists())
             self.assertTrue(keep.exists())
+
+
+class ResolveFinalPathTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def touch(self, name):
+        p = self.root / name
+        p.write_bytes(b"x")
+        return p
+
+    def test_free_target_used_as_is(self):
+        src = self.touch("a.mp4")
+        target = self.root / "a.mkv"
+        final = resolve_final_path(src, target, ".mkv", "av1", keep=False)
+        self.assertEqual(final, target)
+
+    def test_in_place_replacement_allowed(self):
+        src = self.touch("a.mkv")
+        final = resolve_final_path(src, src, ".mkv", "av1", keep=False)
+        self.assertEqual(final, src)
+
+    def test_unrelated_target_is_not_overwritten(self):
+        src = self.touch("a.mp4")
+        victim = self.touch("a.mkv")
+        final = resolve_final_path(src, victim, ".mkv", "av1", keep=False)
+        self.assertEqual(final, self.root / "a.av1.mkv")
+        self.assertTrue(victim.exists())
+
+    def test_keep_mode_never_targets_source(self):
+        src = self.touch("a.mkv")
+        final = resolve_final_path(src, src, ".mkv", "av1", keep=True)
+        self.assertEqual(final, self.root / "a.av1.mkv")
+
+    def test_fallback_taken_raises(self):
+        src = self.touch("a.mp4")
+        self.touch("a.mkv")
+        self.touch("a.av1.mkv")
+        with self.assertRaises(RuntimeError) as cm:
+            resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
+                               keep=False)
+        self.assertIn("already exists", str(cm.exception))
 
 
 if __name__ == "__main__":

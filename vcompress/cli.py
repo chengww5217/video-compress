@@ -100,6 +100,36 @@ def _fmt_hms(seconds: int) -> str:
     return f"{seconds // 3600}:{seconds % 3600 // 60:02d}:{seconds % 60:02d}"
 
 
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.samefile(b)
+    except OSError:
+        return str(a.resolve()) == str(b.resolve())
+
+
+def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
+                       keep: bool, log=None) -> Path:
+    """决定最终输出路径，任何情况下都不覆盖已存在的其它文件。
+
+    非 keep 模式下 target 正好是原文件时属于预期内的原地替换；其余情况只要
+    target 已被占用，就退让到 <名字>.<编码器><扩展名>，该名字也被占用则失败。
+    """
+    if not target.exists():
+        return target
+    if not keep and _same_path(target, src):
+        return target
+    alt = src.with_name(f"{src.stem}.{encoder}{out_ext}")
+    if alt.exists():
+        raise RuntimeError(
+            f"output already exists, refusing to overwrite: {target.name} "
+            f"(fallback {alt.name} is taken too)"
+        )
+    if log:
+        log.warning(f"{target.name} already exists and is not the source; "
+                    f"writing to {alt.name} instead")
+    return alt
+
+
 def process_file(ctx: Ctx, src: Path):
     store = ctx.store
     show = ctx.show_progress
@@ -144,6 +174,8 @@ def process_file(ctx: Ctx, src: Path):
         return "dryrun"
 
     try:
+        # 先判定输出名，避免编码几小时后才发现名字冲突
+        resolve_final_path(src, target, out_ext, ctx.encoder, ctx.keep)
         crf = default_crf
         if ctx.adaptive and ctx.cfg["adaptive"].get("enabled", True) and info.duration > 0:
             picked = encode.pick_crf_adaptive(
@@ -187,28 +219,17 @@ def process_file(ctx: Ctx, src: Path):
             raise RuntimeError(msg)
 
         recycle = ctx.recycle
-        final = target
-        if ctx.keep:
-            if str(target.resolve()) == str(src.resolve()):
-                final = src.with_name(f"{src.stem}.{ctx.encoder}{out_ext}")
-            if final.exists():
-                raise RuntimeError(
-                    f"keep mode: output already exists, refusing to "
-                    f"overwrite: {final.name}"
-                )
-            os.replace(tmp, final)
-        else:
-            if target.exists():
-                if recycle:
-                    _trash(target)
-                else:
-                    target.unlink()
-            os.replace(tmp, target)
-            if str(target.resolve()) != str(src.resolve()):
-                if recycle:
-                    _trash(src)
-                else:
-                    src.unlink()
+        final = resolve_final_path(src, target, out_ext, ctx.encoder,
+                                   ctx.keep, log)
+        in_place = not ctx.keep and _same_path(final, src)
+        if in_place and recycle:
+            _trash(src)
+        os.replace(tmp, final)
+        if not ctx.keep and not in_place:
+            if recycle:
+                _trash(src)
+            else:
+                src.unlink()
 
         saving = 1 - final.stat().st_size / info.size
         kept = ", original kept" if ctx.keep else ""

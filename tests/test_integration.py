@@ -118,6 +118,23 @@ class IntegrationTests(unittest.TestCase):
              str(cls.root / "same_ext.mkv")],
             check=True, capture_output=True, timeout=120,
         )
+        # collide.mp4 的输出名会撞上一个内容完全不同的 collide.mkv
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p",
+             str(cls.root / "collide.mp4")],
+            check=True, capture_output=True, timeout=120,
+        )
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=5:size=320x180:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "20",
+             "-pix_fmt", "yuv420p", "-metadata", "title=UNRELATED_USER_FILE",
+             str(cls.root / "collide.mkv")],
+            check=True, capture_output=True, timeout=120,
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -218,6 +235,35 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(prev.stat().st_size, IntegrationTests.prev_output_size,
                          "previous output content must be unchanged")
         self.assertEqual(list(self.root.glob("*.tmp.mkv")), [])
+
+
+    def test_f_unrelated_target_name_is_never_overwritten(self):
+        victim = self.root / "collide.mkv"
+        before_size = victim.stat().st_size
+        before_title = self.ffprobe_field(victim, "format_tags=title")
+        self.assertEqual(before_title, "UNRELATED_USER_FILE")
+
+        r = self.run_vcompress("--no-adaptive", videos=("collide.mp4",))
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("[ok] collide.mp4", r.stdout)
+        self.assertIn("writing to collide.av1.mkv instead", r.stdout)
+
+        self.assertTrue(victim.exists(), "unrelated file must survive")
+        self.assertEqual(victim.stat().st_size, before_size)
+        self.assertEqual(self.ffprobe_field(victim, "format_tags=title"),
+                         "UNRELATED_USER_FILE")
+        self.assertTrue((self.root / "collide.av1.mkv").exists())
+        self.assertFalse((self.root / "collide.mp4").exists(),
+                         "original should still be replaced")
+
+    def ffprobe_field(self, path, entries):
+        fp = Tools({"ffmpeg": "", "ffprobe": ""}).ffprobe
+        r = subprocess.run(
+            [fp, "-v", "error", "-show_entries", entries, "-of", "csv=p=0",
+             str(path)],
+            capture_output=True, text=True, timeout=60,
+        )
+        return r.stdout.strip()
 
 
 if __name__ == "__main__":
