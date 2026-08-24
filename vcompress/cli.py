@@ -274,6 +274,12 @@ def _trash(path: Path):
         path.unlink()
 
 
+def resolve_run_path(base: Path, value: str) -> Path:
+    """[run] 里的相对路径按配置文件所在目录解析，而不是当前工作目录。"""
+    p = Path(value).expanduser()
+    return p if p.is_absolute() else base / p
+
+
 def setup_logging(log_file: str):
     lf = Path(log_file)
     lf.parent.mkdir(parents=True, exist_ok=True)
@@ -321,9 +327,11 @@ def main():
                          "colliding files fail instead of being overwritten)")
     args = ap.parse_args()
 
-    cfg = load_config(Path(args.config))
+    cfg_path = Path(args.config).expanduser().resolve()
+    cfg = load_config(cfg_path)
     run_cfg = cfg["run"]
-    setup_logging(run_cfg["log_file"])
+    cfg_dir = cfg_path.parent
+    setup_logging(resolve_run_path(cfg_dir, run_cfg["log_file"]))
     encode.clear_cancel()
     if args.encoder:
         cfg["encode"]["encoder"] = args.encoder
@@ -339,7 +347,7 @@ def main():
         return 0
     log.info(f"{len(files)} file(s) to examine")
 
-    store_path = Path(run_cfg["results_file"])
+    store_path = resolve_run_path(cfg_dir, run_cfg["results_file"])
     store = ResultStore(store_path)
 
     ctx = Ctx()

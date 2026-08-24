@@ -345,6 +345,40 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("[skip] marker.mkv", second.stdout)
         self.assertIn("already processed by zzmark", second.stdout)
 
+    def test_j_relative_run_paths_follow_the_config_file(self):
+        box = self.root / "box"
+        box.mkdir(exist_ok=True)
+        cfg = box / "config.toml"
+        cfg.write_text(
+            INTEGRATION_CONFIG
+            .replace('"{root}/results.jsonl"', '"logs/results.jsonl"')
+            .replace('"{root}/logs/test.log"', '"logs/vcompress.log"'),
+            encoding="utf-8",
+        )
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = box / "relpath.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", str(src)],
+            check=True, capture_output=True, timeout=120,
+        )
+
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(src),
+             "--config", str(cfg), "--no-adaptive"],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        results = box / "logs" / "results.jsonl"
+        self.assertTrue(results.exists(),
+                        "results.jsonl must sit next to the config, not in cwd")
+        self.assertTrue((box / "logs" / "vcompress.log").exists())
+        self.assertIn("relpath",
+                      results.read_text(encoding="utf-8"))
+
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
         slow_cfg = self.root / "slow.toml"

@@ -9,7 +9,7 @@ from pathlib import Path
 import helpers
 from helpers import make_cfg, make_info
 from vcompress.cli import (ResultStore, clean_stale_tmp, gather_files,
-                           resolve_final_path)
+                           resolve_final_path, resolve_run_path)
 
 
 class ResultStoreTests(unittest.TestCase):
@@ -141,6 +141,22 @@ class ResolveFinalPathTests(unittest.TestCase):
             resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
                                keep=False)
         self.assertIn("already exists", str(cm.exception))
+
+
+class ResolveRunPathTests(unittest.TestCase):
+    def test_relative_path_hangs_off_the_config_dir(self):
+        base = Path("/etc/vcompress")
+        self.assertEqual(resolve_run_path(base, "logs/results.jsonl"),
+                         base / "logs" / "results.jsonl")
+
+    def test_absolute_path_kept(self):
+        base = Path("/etc/vcompress")
+        abs_p = Path(tempfile.gettempdir()).resolve() / "r.jsonl"
+        self.assertEqual(resolve_run_path(base, str(abs_p)), abs_p)
+
+    def test_user_home_expanded(self):
+        got = resolve_run_path(Path("/etc/vcompress"), "~/vc.log")
+        self.assertEqual(got, Path.home() / "vc.log")
 
 
 if __name__ == "__main__":
