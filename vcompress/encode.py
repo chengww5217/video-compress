@@ -74,21 +74,38 @@ def run_managed(cmd: list, cwd=None) -> tuple:
     return proc.returncode, out, err
 
 
+LOSSLESS_AUDIO = ("pcm_", "flac", "alac", "ape", "wavpack", "truehd", "mlp")
+OPUS_MIN_KBPS = 48
+OPUS_MAX_KBPS = 510
+
+
+def opus_bitrate(base_kbps: int, channels: int) -> int:
+    """opus_kbps 以立体声为基准，按声道数线性缩放。"""
+    ch = channels if channels > 0 else 2
+    return max(OPUS_MIN_KBPS, min(OPUS_MAX_KBPS, round(base_kbps * ch / 2)))
+
+
 def audio_args(info, cfg) -> list:
-    threshold = int(cfg["audio"].get("transcode_over_kbps", 512)) * 1000
-    lossless = ("pcm_", "flac", "alac", "ape", "wavpack", "truehd")
-    needs_transcode = False
-    for codec, br in zip(info.audio_codecs, info.audio_bitrates):
-        if codec.startswith(lossless):
-            needs_transcode = True
-        elif br and br > threshold:
-            needs_transcode = True
+    """逐条音轨决定 copy 还是转 Opus，不因为一条无损轨就重压所有音轨。"""
     if not info.audio_codecs:
         return []
-    if needs_transcode:
-        kbps = int(cfg["audio"].get("opus_kbps", 160))
-        return ["-c:a", "libopus", "-b:a", f"{kbps}k"]
-    return ["-c:a", "copy"]
+    threshold = int(cfg["audio"].get("transcode_over_kbps", 512)) * 1000
+    base_kbps = int(cfg["audio"].get("opus_kbps", 160))
+    args = []
+    transcoding = False
+    for i, codec in enumerate(info.audio_codecs):
+        codec = (codec or "").lower()
+        br = info.audio_bitrates[i] if i < len(info.audio_bitrates) else 0
+        ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
+        if codec.startswith(LOSSLESS_AUDIO) or (br and br > threshold):
+            args += [f"-c:a:{i}", "libopus",
+                     f"-b:a:{i}", f"{opus_bitrate(base_kbps, ch)}k"]
+            transcoding = True
+        else:
+            args += [f"-c:a:{i}", "copy"]
+    if not transcoding:
+        return ["-c:a", "copy"]
+    return args
 
 
 MKV_LIKE = {".mkv", ".webm"}

@@ -72,6 +72,7 @@ class VideoInfo:
     comment: str = ""
     audio_codecs: list = field(default_factory=list)
     audio_bitrates: list = field(default_factory=list)
+    audio_channels: list = field(default_factory=list)
     subtitle_codecs: list = field(default_factory=list)
 
 
@@ -126,6 +127,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.comment = str(tags.get("comment") or tags.get("description") or "")
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
     info.audio_bitrates = [_to_int(s.get("bit_rate")) for s in astreams]
+    info.audio_channels = [_to_int(s.get("channels"), 2) for s in astreams]
     info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
     return info
 

@@ -23,15 +23,46 @@ class AudioArgsTests(unittest.TestCase):
         self.assertEqual(encode.audio_args(info, self.cfg), [])
 
     def test_lossless_transcoded_to_opus(self):
-        for codec in ("pcm_s16le", "flac", "alac"):
-            info = make_info(audio_codecs=[codec], audio_bitrates=[0])
+        for codec in ("pcm_s16le", "flac", "alac", "truehd"):
+            info = make_info(audio_codecs=[codec], audio_bitrates=[0],
+                             audio_channels=[2])
             args = encode.audio_args(info, self.cfg)
-            self.assertEqual(args, ["-c:a", "libopus", "-b:a", "160k"], codec)
+            self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k"],
+                             codec)
 
     def test_high_bitrate_transcoded_to_opus(self):
-        info = make_info(audio_codecs=["aac"], audio_bitrates=[900_000])
+        info = make_info(audio_codecs=["aac"], audio_bitrates=[900_000],
+                         audio_channels=[2])
         args = encode.audio_args(info, self.cfg)
-        self.assertEqual(args, ["-c:a", "libopus", "-b:a", "160k"])
+        self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k"])
+
+    def test_bitrate_scales_with_channel_count(self):
+        cases = {1: "80k", 2: "160k", 6: "480k", 8: "510k"}
+        for ch, expected in cases.items():
+            info = make_info(audio_codecs=["flac"], audio_bitrates=[0],
+                             audio_channels=[ch])
+            args = encode.audio_args(info, self.cfg)
+            self.assertEqual(args[3], expected, f"{ch} channels")
+
+    def test_only_offending_track_is_transcoded(self):
+        info = make_info(audio_codecs=["truehd", "aac"],
+                         audio_bitrates=[4_000_000, 192_000],
+                         audio_channels=[6, 2])
+        args = encode.audio_args(info, self.cfg)
+        self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "480k",
+                                "-c:a:1", "copy"])
+
+    def test_all_copyable_tracks_use_the_short_form(self):
+        info = make_info(audio_codecs=["aac", "ac3"],
+                         audio_bitrates=[192_000, 448_000],
+                         audio_channels=[2, 6])
+        self.assertEqual(encode.audio_args(info, self.cfg), ["-c:a", "copy"])
+
+    def test_missing_channel_info_falls_back_to_stereo(self):
+        info = make_info(audio_codecs=["flac"], audio_bitrates=[0],
+                         audio_channels=[])
+        args = encode.audio_args(info, self.cfg)
+        self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k"])
 
 
 class VideoArgsTests(unittest.TestCase):

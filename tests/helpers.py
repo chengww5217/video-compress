@@ -70,6 +70,7 @@ def make_info(**kw):
         comment="",
         audio_codecs=["aac"],
         audio_bitrates=[192_000],
+        audio_channels=[2],
         subtitle_codecs=[],
     )
     base.update(kw)
