@@ -248,6 +248,41 @@ class PooledMeanTests(unittest.TestCase):
             encode._pooled_mean({"pooled_metrics": {"vmaf": {"mean": "n/a"}}})
 
 
+ENCODERS_SAMPLE = """Encoders:
+ V..... = Video
+ A..... = Audio
+ ------
+ V....D libx264              libx264 H.264 / AVC (codec h264)
+ V..... libsvtav1            SVT-AV1 encoder (codec av1)
+ A....D libopus              libopus Opus (codec opus)
+ S..... srt                  SubRip subtitle
+"""
+
+FILTERS_SAMPLE = """Filters:
+  T.. = Timeline support
+ ... libvmaf           VV->V      Calculate the VMAF between two streams.
+ ..C scale             V->V       Scale the input video size.
+ ... amix              N->A       Audio mixing.
+"""
+
+
+class BuildCapabilityTests(unittest.TestCase):
+    def test_encoder_names_parsed(self):
+        names = encode._parse_encoder_names(ENCODERS_SAMPLE)
+        self.assertEqual(names, {"libx264", "libsvtav1", "libopus", "srt"})
+
+    def test_encoder_header_lines_ignored(self):
+        self.assertNotIn("=", encode._parse_encoder_names(ENCODERS_SAMPLE))
+
+    def test_filter_names_parsed(self):
+        names = encode._parse_filter_names(FILTERS_SAMPLE)
+        self.assertEqual(names, {"libvmaf", "scale", "amix"})
+
+    def test_missing_binary_yields_empty_sets(self):
+        self.assertEqual(encode.available_encoders("no-such-ffmpeg-xyz"), set())
+        self.assertEqual(encode.available_filters("no-such-ffmpeg-xyz"), set())
+
+
 class SegmentCmdTests(unittest.TestCase):
     def cmd(self, start, seconds=5.0):
         return encode.segment_cmd("ffmpeg", Path("in.mkv"), start, seconds,

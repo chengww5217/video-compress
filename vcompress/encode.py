@@ -1,11 +1,14 @@
 import collections
 import json
+import re
 import shlex
 import subprocess
 import tempfile
 import threading
 import time
 from pathlib import Path
+
+_NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]*")
 
 _active_procs = set()
 _lock = threading.Lock()
@@ -83,6 +86,43 @@ def opus_bitrate(base_kbps: int, channels: int) -> int:
     """opus_kbps 以立体声为基准，按声道数线性缩放。"""
     ch = channels if channels > 0 else 2
     return max(OPUS_MIN_KBPS, min(OPUS_MAX_KBPS, round(base_kbps * ch / 2)))
+
+
+def _parse_encoder_names(text: str) -> set:
+    """解析 ffmpeg -encoders 输出，取出编码器名字（跳过开头的图例行）。"""
+    names = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 2 and len(parts[0]) == 6 and parts[0][0] in "VAS" \
+                and _NAME_RE.fullmatch(parts[1]):
+            names.add(parts[1])
+    return names
+
+
+def _parse_filter_names(text: str) -> set:
+    names = set()
+    for line in text.splitlines():
+        parts = line.split()
+        if len(parts) >= 4 and len(parts[0]) <= 3 and "->" in parts[2] \
+                and _NAME_RE.fullmatch(parts[1]):
+            names.add(parts[1])
+    return names
+
+
+def available_encoders(ffmpeg: str) -> set:
+    try:
+        rc, out, _err = run_managed([ffmpeg, "-hide_banner", "-encoders"])
+    except OSError:
+        return set()
+    return _parse_encoder_names(out) if rc == 0 else set()
+
+
+def available_filters(ffmpeg: str) -> set:
+    try:
+        rc, out, _err = run_managed([ffmpeg, "-hide_banner", "-filters"])
+    except OSError:
+        return set()
+    return _parse_filter_names(out) if rc == 0 else set()
 
 
 def audio_args(info, cfg) -> list:

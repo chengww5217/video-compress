@@ -429,6 +429,33 @@ class IntegrationTests(unittest.TestCase):
                            "misaligned sampling would collapse the score")
         self.assertEqual(msg, "")
 
+    def test_m_missing_encoder_fails_before_touching_anything(self):
+        cfg = self.root / "badcodec.toml"
+        cfg.write_text(
+            INTEGRATION_CONFIG.replace("{root}", self.root.as_posix())
+            .replace('codec = "libsvtav1"', 'codec = "libdefinitelynope"'),
+            encoding="utf-8",
+        )
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = self.root / "badcodec.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", str(src)],
+            check=True, capture_output=True, timeout=120,
+        )
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(src), "--config", str(cfg)],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=120,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertIn("libdefinitelynope", r.stdout)
+        self.assertNotIn("[encode]", r.stdout, "must not start encoding")
+        self.assertTrue(src.exists())
+        self.assertFalse((self.root / "badcodec.mkv").exists())
+
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
         slow_cfg = self.root / "slow.toml"

@@ -284,6 +284,35 @@ def _trash(path: Path):
         path.unlink()
 
 
+def preflight(tools, cfg: dict, encoder: str, adaptive: bool) -> bool:
+    """先确认这个 ffmpeg 构建能干活，别等编码到一半才报错。"""
+    codec = cfg["encode"][encoder]["codec"]
+    encoders = encode.available_encoders(tools.ffmpeg)
+    if not encoders:
+        log.warning("cannot list ffmpeg encoders; skipping the build self-check")
+        return True
+    if codec not in encoders:
+        log.error(f"this ffmpeg build has no {codec} (needed for --encoder "
+                  f"{encoder}); install a full build or switch encoders")
+        return False
+    if "libopus" not in encoders:
+        log.warning("this ffmpeg build has no libopus; lossless or very "
+                    "high bitrate audio tracks cannot be transcoded")
+
+    wants_vmaf = (adaptive and cfg["adaptive"].get("enabled", True)) or \
+        cfg["verify"].get("vmaf_enabled", True)
+    if wants_vmaf:
+        missing = []
+        if "libvmaf" not in encode.available_filters(tools.ffmpeg):
+            missing.append("the libvmaf filter")
+        if "libx264" not in encoders:
+            missing.append("libx264 (used for the lossless sample segments)")
+        if missing:
+            log.warning("this ffmpeg build lacks " + " and ".join(missing) +
+                        "; adaptive CRF and the VMAF spot check will fall back")
+    return True
+
+
 def resolve_run_path(base: Path, value: str) -> Path:
     """[run] 里的相对路径按配置文件所在目录解析，而不是当前工作目录。"""
     p = Path(value).expanduser()
@@ -349,6 +378,9 @@ def main():
 
     tools = probe.Tools(cfg["tools"])
     log.info(f"ffmpeg: {tools.ffmpeg}")
+
+    if not preflight(tools, cfg, encoder, args.adaptive):
+        return 1
 
     exts = {e.lower() for e in cfg["skip"]["extensions"]}
     files = gather_files(args.paths, args.recursive, exts)
