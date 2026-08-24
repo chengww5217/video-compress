@@ -67,7 +67,7 @@ def make_info(**kw):
         duration=600.0,
         size=500_000_000,
         pix_fmt="yuv420p",
-        tagged=False,
+        comment="",
         audio_codecs=["aac"],
         audio_bitrates=[192_000],
         subtitle_codecs=[],

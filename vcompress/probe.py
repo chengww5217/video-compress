@@ -69,7 +69,7 @@ class VideoInfo:
     duration: float = 0.0
     size: int = 0
     pix_fmt: str = ""
-    tagged: bool = False
+    comment: str = ""
     audio_codecs: list = field(default_factory=list)
     audio_bitrates: list = field(default_factory=list)
     subtitle_codecs: list = field(default_factory=list)
@@ -123,8 +123,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.duration = float(fmt.get("duration") or vstream.get("duration") or 0)
     info.size = _to_int(fmt.get("size"), default=path.stat().st_size)
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
-    comment = str(tags.get("comment") or tags.get("description") or "")
-    info.tagged = "vcompress" in comment.lower()
+    info.comment = str(tags.get("comment") or tags.get("description") or "")
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
     info.audio_bitrates = [_to_int(s.get("bit_rate")) for s in astreams]
     info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
@@ -132,8 +131,8 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
 
 
 def should_skip(info: VideoInfo, cfg: dict):
-    marker = cfg["skip"].get("tag_marker", "vcompress")
-    if info.tagged:
+    marker = str(cfg["skip"].get("tag_marker", "vcompress"))
+    if marker and marker.lower() in (info.comment or "").lower():
         return True, f"already processed by {marker}"
 
     min_size = int(cfg["skip"].get("min_size_mb", 0)) * 1024 * 1024

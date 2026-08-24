@@ -32,9 +32,29 @@ class ShouldSkipTests(unittest.TestCase):
         self.cfg = make_cfg()
 
     def test_tagged_file_skips(self):
-        skip, reason = should_skip(make_info(tagged=True), self.cfg)
+        skip, reason = should_skip(make_info(comment="vcompress-v1"), self.cfg)
         self.assertTrue(skip)
         self.assertIn("processed", reason)
+
+    def test_marker_match_is_case_insensitive(self):
+        skip, _ = should_skip(make_info(comment="Encoded by VCompress-v1"),
+                              self.cfg)
+        self.assertTrue(skip)
+
+    def test_custom_marker_is_honoured(self):
+        self.cfg["skip"]["tag_marker"] = "zzmark"
+        skip, reason = should_skip(make_info(comment="zzmark-v1"), self.cfg)
+        self.assertTrue(skip)
+        self.assertIn("zzmark", reason)
+
+    def test_custom_marker_ignores_the_default_one(self):
+        self.cfg["skip"]["tag_marker"] = "zzmark"
+        skip, _ = should_skip(make_info(comment="vcompress-v1"), self.cfg)
+        self.assertFalse(skip, "only the configured marker should count")
+
+    def test_unrelated_comment_does_not_skip(self):
+        skip, _ = should_skip(make_info(comment="ripped by someone"), self.cfg)
+        self.assertFalse(skip)
 
     def test_small_file_skips(self):
         skip, reason = should_skip(make_info(size=1024), self.cfg)

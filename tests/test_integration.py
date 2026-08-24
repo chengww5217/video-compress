@@ -307,6 +307,44 @@ class IntegrationTests(unittest.TestCase):
         self.assertNotIn("data", kinds, "tmcd data stream must be dropped")
         self.assertEqual(kinds.count("subtitle"), 1)
 
+    def test_i_custom_tag_marker_round_trips(self):
+        cfg = self.root / "marker.toml"
+        cfg.write_text(
+            (self.root / "config.toml").read_text(encoding="utf-8")
+            .replace('tag_marker = "vcompress"', 'tag_marker = "zzmark"')
+            .replace(f"{self.root.as_posix()}/results.jsonl",
+                     f"{self.root.as_posix()}/marker-results.jsonl"),
+            encoding="utf-8",
+        )
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", str(self.root / "marker.mp4")],
+            check=True, capture_output=True, timeout=120,
+        )
+
+        def run(*videos):
+            return subprocess.run(
+                [sys.executable, "-m", "vcompress",
+                 *[str(self.root / v) for v in videos],
+                 "--config", str(cfg), "--no-adaptive"],
+                cwd=str(helpers.ROOT), capture_output=True, text=True,
+                encoding="utf-8", errors="replace", timeout=300,
+            )
+
+        first = run("marker.mp4")
+        self.assertEqual(first.returncode, 0, first.stdout)
+        out = self.root / "marker.mkv"
+        self.assertTrue(out.exists())
+        self.assertIn("zzmark",
+                      self.ffprobe_field(out, "format_tags=COMMENT"))
+
+        second = run("marker.mkv")
+        self.assertIn("[skip] marker.mkv", second.stdout)
+        self.assertIn("already processed by zzmark", second.stdout)
+
     def test_g_sigint_kills_all_workers_promptly(self):
         # 用慢 preset + 稍大画面，保证发信号时两个 worker 都还在编码
         slow_cfg = self.root / "slow.toml"
