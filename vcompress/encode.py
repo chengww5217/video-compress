@@ -80,12 +80,28 @@ def run_managed(cmd: list, cwd=None) -> tuple:
 LOSSLESS_AUDIO = ("pcm_", "flac", "alac", "ape", "wavpack", "truehd", "mlp")
 OPUS_MIN_KBPS = 48
 OPUS_MAX_KBPS = 510
+# libopus 只认这几种规范布局，5.1(side) 这类变体会让编码器打不开
+OPUS_LAYOUTS = {1: "mono", 2: "stereo", 3: "3.0", 4: "quad",
+                5: "5.0", 6: "5.1", 7: "6.1", 8: "7.1"}
 
 
 def opus_bitrate(base_kbps: int, channels: int) -> int:
     """opus_kbps 以立体声为基准，按声道数线性缩放。"""
     ch = channels if channels > 0 else 2
     return max(OPUS_MIN_KBPS, min(OPUS_MAX_KBPS, round(base_kbps * ch / 2)))
+
+
+def opus_layout_args(index: int, channels: int) -> list:
+    """把声道布局规范化到 libopus 接受的形式。
+
+    ffmpeg 的 libopus 封装会校验布局名：5.1(side)、unknown 这类直接报
+    "Invalid channel layout ... for specified mapping family" 而整个转码失败。
+    声道数已知就按规范布局重排，超过 8 声道退回任意映射。
+    """
+    layout = OPUS_LAYOUTS.get(channels)
+    if layout:
+        return [f"-filter:a:{index}", f"aformat=channel_layouts={layout}"]
+    return [f"-mapping_family:a:{index}", "255"]
 
 
 def _parse_encoder_names(text: str) -> set:
@@ -140,6 +156,7 @@ def audio_args(info, cfg) -> list:
         if codec.startswith(LOSSLESS_AUDIO) or (br and br > threshold):
             args += [f"-c:a:{i}", "libopus",
                      f"-b:a:{i}", f"{opus_bitrate(base_kbps, ch)}k"]
+            args += opus_layout_args(i, ch)
             transcoding = True
         else:
             args += [f"-c:a:{i}", "copy"]
