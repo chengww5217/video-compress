@@ -171,7 +171,7 @@ class IntegrationTests(unittest.TestCase):
         )
 
     def test_a_compress_replaces_and_keeps_bad_file(self):
-        r = self.run_vcompress("--no-adaptive")
+        r = self.run_vcompress("--no-adaptive", "--delete-original")
         self.assertEqual(r.returncode, 1)
         self.assertIn("[ok] src.mp4", r.stdout)
         self.assertIn("[encode] src.mp4", r.stdout)
@@ -263,7 +263,8 @@ class IntegrationTests(unittest.TestCase):
         before_title = self.ffprobe_field(victim, "format_tags=title")
         self.assertEqual(before_title, "UNRELATED_USER_FILE")
 
-        r = self.run_vcompress("--no-adaptive", videos=("collide.mp4",))
+        r = self.run_vcompress("--no-adaptive", "--delete-original",
+                               videos=("collide.mp4",))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("[ok] collide.mp4", r.stdout)
         self.assertIn("writing to collide.av1.mkv instead", r.stdout)
@@ -669,6 +670,7 @@ class IntegrationTests(unittest.TestCase):
         r = subprocess.run(
             [sys.executable, "-m", "vcompress", str(box / "a.mp4"),
              str(box / "a.mkv"), "--config", str(cfg), "--no-adaptive",
+             "--delete-original",
              "--workers", "2"],
             cwd=str(helpers.ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=600,

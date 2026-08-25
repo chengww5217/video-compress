@@ -95,4 +95,4 @@ log_file = "logs/vcompress.log"
 log_max_bytes = 5242880
 log_backups = 3
 use_recycle_bin = false
-keep_original = false      # 等价于每次都加 --keep
+delete_original = false    # 默认保留原文件；true 则压缩校验通过后删除原文件

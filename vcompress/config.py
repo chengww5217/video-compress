@@ -89,7 +89,7 @@ DEFAULTS = {
         "log_max_bytes": 5_242_880,
         "log_backups": 3,
         "use_recycle_bin": False,
-        "keep_original": False,
+        "delete_original": False,
     },
 }
 

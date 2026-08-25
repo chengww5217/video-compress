@@ -92,10 +92,15 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-adaptive", dest="adaptive", action="store_false")
     ap.add_argument("--recycle", action="store_true",
                     help="move originals to recycle bin instead of deleting")
-    ap.add_argument("--keep", action="store_true",
-                    help="keep the original file; only write the compressed copy "
-                         "(collisions are named <name>.<encoder><ext>, still "
-                         "colliding files fail instead of being overwritten)")
+    keep = ap.add_mutually_exclusive_group()
+    keep.add_argument("--keep", action="store_true",
+                      help="keep the original file; only write the compressed copy "
+                           "(collisions are named <name>.<encoder><ext>, still "
+                           "colliding files fail instead of being overwritten; "
+                           "this is the default)")
+    keep.add_argument("--delete-original", action="store_true",
+                      help="delete the original file once the compressed copy "
+                           "passes verification (overrides the default keep)")
     return ap
 
 
@@ -212,6 +217,13 @@ def main(argv=None) -> int:
     # 只有真正串行执行时进度条才不会被别的文件的输出打断
     serial = workers <= 1 or len(todo) <= 1
 
+    if args.keep:
+        keep = True
+    elif args.delete_original:
+        keep = False
+    else:
+        keep=not bool(run_cfg["delete_original"]),
+
     ctx = RunContext(
         cfg=cfg,
         tools=tools,
@@ -223,7 +235,7 @@ def main(argv=None) -> int:
         dry_run=args.dry_run,
         adaptive=args.adaptive,
         recycle=args.recycle or bool(run_cfg["use_recycle_bin"]),
-        keep=args.keep or bool(run_cfg["keep_original"]),
+        keep=keep,
         show_progress=serial and not args.dry_run,
     )
 
