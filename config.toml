@@ -34,12 +34,14 @@ output_container = ".mkv"
 codec = "libsvtav1"
 preset = "2"
 crf = 28
+min_bit_depth = 10
 extra = "-svtav1-params tune=0:film-grain-denoise=0"
 
 [encode.x265]
 codec = "libx265"
 preset = "placebo"
 crf = 20
+min_bit_depth = 10
 extra = "-x265-params aq-mode=3:psy-rd=2.0"
 
 [adaptive]

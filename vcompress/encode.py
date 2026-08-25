@@ -166,6 +166,33 @@ def choose_pix_fmt(src_pix_fmt: str, supported) -> str | None:
     return None
 
 
+def bumped_pix_fmt(pix_fmt: str, supported, min_depth: int):
+    """位深低于 min_depth 时提到 min_depth，色度抽样保持不变。
+
+    8-bit 源用 10-bit 编码是 AV1/HEVC 上公认的免费收益：编码器内部精度更高，
+    暗部渐变不容易出现 banding，同画质下码率还略低一点。代价只是编解码稍慢，
+    而 AV1 Main / HEVC Main10 都是必备档位，兼容性没有实际影响。
+
+    只动位深不动色度：4:2:2/4:4:4 的源（ProRes 之类）在支持它们的编码器上要
+    原样保留，把它们压成 4:2:0 才是真丢信息。认不出格式族时返回 None 不动。
+    """
+    if min_depth <= 8 or not pix_fmt or not supported:
+        return None
+    if pix_fmt_depth(pix_fmt) >= min_depth:
+        return None
+    m = re.match(r"^(yuv[0-9]{3}p|gbrp)(?:\d{1,2}(?:[lb]e)?)?$", pix_fmt)
+    if not m:
+        return None
+    family = m.group(1)
+    for depth in (min_depth, 12, 16):
+        if depth < min_depth:
+            continue
+        cand = f"{family}{depth}le"
+        if cand in supported:
+            return cand
+    return None
+
+
 def with_pix_fmt(encoder_cfg: dict, src_pix_fmt: str, supported,
                  log=None) -> dict:
     """给编码器配置补上 -pix_fmt，必要时告警说明降级到了什么。
@@ -186,6 +213,14 @@ def with_pix_fmt(encoder_cfg: dict, src_pix_fmt: str, supported,
         if log:
             log.warning(f"{cfg['codec']} does not accept {src_pix_fmt} and no "
                         f"close substitute is available; the encode may fail")
+    current = cfg.get("pix_fmt") or src_pix_fmt
+    bumped = bumped_pix_fmt(current, supported,
+                            to_int(cfg.get("min_bit_depth"), 10))
+    if bumped:
+        cfg["pix_fmt"] = bumped
+        if log:
+            log.info(f"encoding {current} source as {bumped} "
+                     f"(higher internal precision, less banding)")
     return cfg
 
 

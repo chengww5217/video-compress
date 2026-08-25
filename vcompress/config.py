@@ -38,12 +38,14 @@ DEFAULTS = {
             "codec": "libsvtav1",
             "preset": "2",
             "crf": 28,
+            "min_bit_depth": 10,
             "extra": "-svtav1-params tune=0:film-grain-denoise=0",
         },
         "x265": {
             "codec": "libx265",
             "preset": "placebo",
             "crf": 20,
+            "min_bit_depth": 10,
             "extra": "-x265-params aq-mode=3:psy-rd=2.0",
         },
     },
@@ -93,6 +95,9 @@ ENCODER_KEYS = {
     "extra": str,
     # 留空表示按源片自动决定；只在源像素格式该编码器不支持时才需要手动指定
     "pix_fmt": str,
+    # 位深下限：8-bit 源提到 10-bit 编码（精度更高、更不容易 banding）；
+    # 写 8 表示照源片位深编
+    "min_bit_depth": int,
 }
 ENCODER_REQUIRED = ("codec", "preset", "crf")
 
@@ -204,6 +209,11 @@ def _check_encoders(cfg: dict, errors: list):
         for key, expected in ENCODER_KEYS.items():
             if key in table and not _type_ok(table[key], expected):
                 errors.append(f"[{_name(path)}] {key} has the wrong type")
+        depth = table.get("min_bit_depth")
+        if isinstance(depth, int) and not isinstance(depth, bool) \
+                and not 8 <= depth <= 16:
+            errors.append(f"[{_name(path)}] min_bit_depth must be within "
+                          f"[8, 16] (8 means keep the source depth)")
     selected = cfg["encode"].get("encoder")
     if selected not in names:
         errors.append(f"[encode] encoder = {selected!r} has no matching "
@@ -294,6 +304,7 @@ def normalise(user_cfg: dict) -> dict:
     # 用户新增的编码器子表也要拿到可选键的默认值
     for name in encoder_names(cfg):
         cfg["encode"][name].setdefault("extra", "")
+        cfg["encode"][name].setdefault("min_bit_depth", 10)
     return validate(cfg)
 
 

@@ -710,7 +710,8 @@ class IntegrationTests(unittest.TestCase):
         out = box / "chroma422.mkv"
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertTrue(out.exists(), r.stdout)
-        self.assertEqual(self.pix_fmt(out), "yuv420p", r.stdout)
+        # 4:2:2 归一化到 4:2:0，同时 8-bit 提到 10-bit 编码
+        self.assertEqual(self.pix_fmt(out), "yuv420p10le", r.stdout)
         self.assertIn("does not accept yuv422p", r.stdout)
 
     def test_s_original_comment_is_kept_alongside_the_marker(self):

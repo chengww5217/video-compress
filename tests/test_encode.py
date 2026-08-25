@@ -460,6 +460,56 @@ class VmafLavfiTests(unittest.TestCase):
         self.assertIn("[0:v]setpts", lavfi)
 
 
+class BitDepthBumpTests(unittest.TestCase):
+    """8-bit 源用 10-bit 编码：精度更高、暗部渐变不容易 banding，码率还略低。"""
+
+    SVT = {"yuv420p", "yuv420p10le"}
+    X265 = {"yuv420p", "yuv420p10le", "yuv422p", "yuv422p10le", "yuv444p",
+            "yuv444p10le", "yuv420p12le"}
+
+    def test_eight_bit_is_bumped(self):
+        self.assertEqual(encode.bumped_pix_fmt("yuv420p", self.SVT, 10),
+                         "yuv420p10le")
+
+    def test_chroma_subsampling_is_preserved(self):
+        """4:2:2 源在支持它的编码器上只提位深，不能顺手压成 4:2:0。"""
+        self.assertEqual(encode.bumped_pix_fmt("yuv422p", self.X265, 10),
+                         "yuv422p10le")
+        self.assertEqual(encode.bumped_pix_fmt("yuv444p", self.X265, 10),
+                         "yuv444p10le")
+
+    def test_already_deep_enough_is_left_alone(self):
+        self.assertIsNone(encode.bumped_pix_fmt("yuv420p10le", self.SVT, 10))
+        self.assertIsNone(encode.bumped_pix_fmt("yuv420p12le", self.X265, 10))
+
+    def test_disabled_by_min_depth_eight(self):
+        self.assertIsNone(encode.bumped_pix_fmt("yuv420p", self.SVT, 8))
+
+    def test_falls_back_to_a_deeper_format_when_needed(self):
+        self.assertEqual(
+            encode.bumped_pix_fmt("yuv420p", {"yuv420p", "yuv420p12le"}, 10),
+            "yuv420p12le")
+
+    def test_unsupported_bump_changes_nothing(self):
+        self.assertIsNone(encode.bumped_pix_fmt("yuv420p", {"yuv420p"}, 10))
+
+    def test_exotic_formats_are_left_alone(self):
+        for fmt in ("nv12", "p010le", "rgb24", "gray", "yuvj420p", ""):
+            self.assertIsNone(
+                encode.bumped_pix_fmt(fmt, self.SVT | {"nv12", "gray"}, 10),
+                fmt)
+
+    def test_with_pix_fmt_bumps_a_supported_source(self):
+        cfg = encode.with_pix_fmt(make_cfg()["encode"]["av1"], "yuv420p",
+                                  self.SVT, None)
+        self.assertEqual(cfg["pix_fmt"], "yuv420p10le")
+
+    def test_explicit_pix_fmt_still_wins(self):
+        base = dict(make_cfg()["encode"]["av1"], pix_fmt="yuv420p")
+        cfg = encode.with_pix_fmt(base, "yuv420p", self.SVT, None)
+        self.assertEqual(cfg["pix_fmt"], "yuv420p")
+
+
 class PixFmtTests(unittest.TestCase):
     """libsvtav1 只吃 4:2:0；不归一化的话 4:2:2 源（ProRes、部分 mov）直接失败。"""
 
@@ -499,12 +549,18 @@ class PixFmtTests(unittest.TestCase):
     def test_with_pix_fmt_adds_the_flag_and_warns(self):
         warnings = []
         log = _FakeLog(warnings)
-        cfg = encode.with_pix_fmt(make_cfg()["encode"]["av1"], "yuv422p",
-                                  self.SVT, log)
+        base = dict(make_cfg()["encode"]["av1"], min_bit_depth=8)
+        cfg = encode.with_pix_fmt(base, "yuv422p", self.SVT, log)
         self.assertEqual(cfg["pix_fmt"], "yuv420p")
         self.assertIn("yuv422p", warnings[0])
         self.assertIn("-pix_fmt", encode.video_args(cfg, 30))
         self.assertEqual(encode.video_args(cfg, 30)[7], "yuv420p")
+
+    def test_subsampled_source_is_also_bumped_to_10_bit(self):
+        """4:2:2 8-bit 源：色度降到 4:2:0，位深顺手提到 10-bit。"""
+        cfg = encode.with_pix_fmt(make_cfg()["encode"]["av1"], "yuv422p",
+                                  self.SVT, None)
+        self.assertEqual(cfg["pix_fmt"], "yuv420p10le")
 
     def test_with_pix_fmt_respects_an_explicit_setting(self):
         base = dict(make_cfg()["encode"]["av1"], pix_fmt="yuv420p10le")
