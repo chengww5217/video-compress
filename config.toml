@@ -96,3 +96,9 @@ log_max_bytes = 5242880
 log_backups = 3
 use_recycle_bin = false
 delete_original = false    # 默认保留原文件；true 则压缩校验通过后删除原文件
+
+# 全部任务结束后自动关机。改成 true 即可（压缩过程中改也生效——所有任务结束时
+# 会重新读一次这个文件）。关机前脚本会把它写回 false：这是一次性开关，下次想
+# 关机得再手动打开一次。倒计时期间 Ctrl+C 可以取消。
+shutdown_when_done = false
+shutdown_delay_seconds = 60  # 下发关机命令前留多少秒给你反悔；0 = 立即关

@@ -7,7 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import config, files, pipeline, probe, proc
+from . import config, files, pipeline, power, probe, proc
 from .caps import Caps
 from .pipeline import RunContext, RunStats
 from .results import ResultStore
@@ -222,7 +222,7 @@ def main(argv=None) -> int:
     elif args.delete_original:
         keep = False
     else:
-        keep=not bool(run_cfg["delete_original"]),
+        keep = not bool(run_cfg["delete_original"])
 
     ctx = RunContext(
         cfg=cfg,
@@ -241,6 +241,10 @@ def main(argv=None) -> int:
 
     if not ctx.dry_run:
         files.clean_stale_tmp(todo, ctx.out_ext)
+        power.announce(cfg_path, bool(run_cfg["shutdown_when_done"]),
+                       int(run_cfg["shutdown_delay_seconds"]))
+    else:
+        log.debug("dry run: auto shutdown is not considered")
 
     try:
         if serial:
@@ -251,7 +255,10 @@ def main(argv=None) -> int:
         proc.terminate_all()
         log.warning("interrupted; partial outputs removed")
         _report(ctx.stats, store)
+        log.info("interrupted, so auto shutdown is skipped")
         return EXIT_INTERRUPTED
 
     _report(ctx.stats, store)
+    if not ctx.dry_run:
+        power.maybe_shutdown(cfg_path, int(run_cfg["shutdown_delay_seconds"]))
     return EXIT_FAILED if ctx.stats.counts["failed"] else EXIT_OK

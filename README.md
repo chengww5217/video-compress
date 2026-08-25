@@ -48,6 +48,7 @@ vcompress ~/videos --dry-run
 - **`[adaptive].target_vmaf`**（默认 95）：视觉无损基准，降到 92~93 体积更小
 - **`[adaptive].enabled`**：自适应 CRF 搜索（默认开），关闭则用固定 CRF
 - **`[run].delete_original`**：默认 `false`（保留原文件），设 `true` 则默认删除原文件
+- **`[run].shutdown_when_done`**：默认 `false`；设 `true` 则所有任务结束后自动关机。压缩过程中改也生效（结束时才重读配置），关机前会自动写回 `false`，属于一次性开关。详见 [完成后自动关机](docs/configuration.md#完成后自动关机-shutdown_when_done)
 
 ## 设计要点
 

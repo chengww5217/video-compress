@@ -73,6 +73,24 @@ vcompress ~/videos --dry-run
 
 中断是安全的：Ctrl+C 会立刻终止所有 ffmpeg 子进程、删掉半成品临时文件，原文件不受影响。串行和并发两种模式都一样。漏下的临时文件会在下次处理同一个文件时清掉。
 
+## 完成后自动关机
+
+挂着跑一晚上、跑完自己关机：把配置文件里 `[run] shutdown_when_done` 改成 `true` 即可。**没有对应的命令行参数**，每次想关机都要手动改这一行。
+
+```toml
+[run]
+shutdown_when_done = true
+shutdown_delay_seconds = 60   # 关机前的倒计时，期间 Ctrl+C 可取消
+```
+
+- 任务**开始**时控制台会播报当前设置（`auto shutdown: ON/OFF`）；关着的时候会顺带提示怎么打开
+- 开关是在**所有任务结束后**重新读一次配置文件才生效的，所以压缩已经跑起来了再改主意也来得及：直接改配置存盘，不用中断重跑
+- 关机前脚本会把 `shutdown_when_done` 写回 `false`——一次性开关，下次想关机得再手动打开；写不回去就放弃关机（避免留下每次运行都关机的隐患）
+- `--dry-run`、Ctrl+C 中断、倒计时期间再按 Ctrl+C，都不会关机；有文件压缩失败**不影响**关机
+- 全过程写日志：重读结果、写回 `false`、实际下发的关机命令都在 `logs/vcompress.log` 里
+
+规则的来龙去脉、各平台用的关机命令、macOS 的授权提示见 [配置说明](configuration.md#完成后自动关机-shutdown_when_done)。
+
 ## 输出命名与覆盖保护
 
 输出容器由 `[encode].output_container` 决定（默认 `.mkv`）：

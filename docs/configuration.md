@@ -107,5 +107,49 @@ VMAF 抽检的判定细节、色彩/HDR 比对原理见 [architecture.md](archit
 | `log_backups` | 3 | 保留的日志备份份数 |
 | `use_recycle_bin` | false | 删除原文件时进回收站 |
 | `delete_original` | false | 压缩校验通过后删除原文件（等价于每次都加 `--delete-original`） |
+| `shutdown_when_done` | false | 全部任务结束后自动关机（一次性开关，关机前会被写回 false） |
+| `shutdown_delay_seconds` | 60 | 下发关机命令前的倒计时秒数，期间 Ctrl+C 可取消；0 = 立即关 |
 
 默认保留原文件，想改成默认删除原文件就在 `[run]` 节设 `delete_original = true`，或每次都加 `--delete-original`。
+
+### 完成后自动关机 `shutdown_when_done`
+
+压一整个目录动辄几个小时，这个开关是为「晚上挂着跑、跑完自己关机」准备的。
+
+```toml
+[run]
+shutdown_when_done = true
+shutdown_delay_seconds = 60
+```
+
+三条刻意的规则：
+
+1. **只认配置文件，没有命令行参数。** 想让某次运行结束后关机，就得手动把这一行改成 `true`——关机这件事不该被一个顺手敲上的参数触发。
+2. **结束时才重新读一次配置文件。** 任务已经跑起来了再改主意（想关 / 不想关）都来得及，改完存盘即可，不用中断重跑。开关是在所有文件都处理完、汇总打印完之后读的，读的是**磁盘上当时的内容**，不是启动时那份。
+3. **关机前先把配置写回 `false`。** 这是一次性开关：下次想关机必须再手动打开一次，不会因为忘了改配置而在下次运行结束时莫名其妙关机。写回失败（文件只读、找不到那一行等）时**放弃关机**并报错——宁可不关，也不留一个每次都关机的隐患。
+
+任务开始时控制台会先播报当前设置，关掉的时候顺便告诉你怎么打开：
+
+```
+auto shutdown: OFF — set [run] shutdown_when_done = true in /path/config.toml to power off 60s after all tasks finish; you can flip it while the run is in progress ...
+```
+
+打开时是：
+
+```
+auto shutdown: ON — the machine powers off 60s after all tasks finish; the flag is read again at the end ...
+```
+
+结束阶段的每一步都写进日志（`re-read <config>: [run] shutdown_when_done = true` → `reset [run] shutdown_when_done = false` → `running: <关机命令>`），事后能从 `logs/vcompress.log` 里看清是关了、没关、还是被取消。
+
+不关机的情形：`--dry-run`、被 Ctrl+C 中断、倒计时期间再按 Ctrl+C、配置文件不存在（打包安装且没有 `config.toml` 时没有可翻的开关）、配置文件坏掉读不出来。**有文件压缩失败不影响关机**——挂机跑的目的就是跑完就关，失败情况看日志和 `results.jsonl`。
+
+关机命令按平台选，不需要 sudo：
+
+| 平台 | 命令 |
+|---|---|
+| Windows | `shutdown /s /t 0` |
+| macOS | `osascript -e 'tell application "System Events" to shut down'` |
+| Linux | `systemctl poweroff`（没有 systemctl 时 `shutdown -h now`） |
+
+macOS 首次执行可能弹窗要求授权终端控制「系统事件」，拒绝授权会导致关机失败（日志里能看到 osascript 的报错）。Linux 上 `shutdown -h now` 这条路径通常需要相应权限。

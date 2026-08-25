@@ -86,6 +86,7 @@ video-compress/
 │   ├── results.py       # results.jsonl 读写与缓存新鲜度判断
 │   ├── progress.py      # 单行进度渲染
 │   ├── proc.py          # 子进程注册表与取消（Ctrl+C 时统一杀干净）
+│   ├── power.py         # 完成后自动关机（结束时重读配置、写回 false）
 │   └── util.py          # 类型宽松转换与格式化
 └── tests/               # 测试（unittest），一个模块一份
     ├── helpers.py           # 配置与 VideoInfo 替身

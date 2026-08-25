@@ -90,6 +90,11 @@ DEFAULTS = {
         "log_backups": 3,
         "use_recycle_bin": False,
         "delete_original": False,
+        # 全部任务结束后自动关机。故意只做成配置项（命令行没有对应参数），
+        # 而且是一次性的：关机前会被写回 false，下次要关必须再手动打开。
+        # 这个值在所有任务结束时会重新读一遍，压缩过程中改主意也来得及。
+        "shutdown_when_done": False,
+        "shutdown_delay_seconds": 60,
     },
 }
 
@@ -262,6 +267,8 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[run] workers must be at least 1")
     if int(cfg["run"]["log_backups"]) < 0:
         errors.append("[run] log_backups cannot be negative")
+    if int(cfg["run"]["shutdown_delay_seconds"]) < 0:
+        errors.append("[run] shutdown_delay_seconds cannot be negative")
 
     ext = cfg["skip"]["extensions"]
     if not ext:

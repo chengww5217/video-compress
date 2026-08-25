@@ -6,10 +6,11 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import caps, cli
+from vcompress import caps, cli, power, proc
 from vcompress.results import ResultStore
 
 
@@ -224,6 +225,81 @@ class MainEarlyExitTests(unittest.TestCase):
         p = self.write_cfg("")
         rc = cli.main([str(self.root), "--config", str(p)])
         self.assertEqual(rc, cli.EXIT_OK)
+
+
+class MainShutdownTests(unittest.TestCase):
+    """关机开关的端到端接线：开始时播报、结束时重读配置、关机前写回 false。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.saved = logging.getLogger().handlers[:]
+        self.cfg_path = self.root / "config.toml"
+        (self.root / "clip.mp4").write_bytes(b"x" * (30 * 1024 * 1024))
+        self.commands = []
+
+    def tearDown(self):
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+            h.close()
+        for h in self.saved:
+            root.addHandler(h)
+        self.tmp.cleanup()
+
+    def write_cfg(self, flag: str) -> None:
+        self.cfg_path.write_text(
+            f'[run]\nlog_file = "{(self.root / "vc.log").as_posix()}"\n'
+            f'results_file = "{(self.root / "r.jsonl").as_posix()}"\n'
+            f'shutdown_when_done = {flag}\n'
+            f'shutdown_delay_seconds = 0\n', encoding="utf-8")
+
+    def run_main(self, extra=None):
+        real_run = proc.run_managed
+
+        def fake_run(cmd, cwd=None):
+            if cmd and cmd[0] == "fake-shutdown":
+                self.commands.append(cmd)
+                return 0, "", ""
+            return real_run(cmd, cwd=cwd)
+
+        with mock.patch.object(power, "shutdown_command",
+                               return_value=["fake-shutdown"]), \
+                mock.patch.object(proc, "run_managed", fake_run):
+            return cli.main([str(self.root), "--config", str(self.cfg_path)]
+                            + (extra or []))
+
+    def log_text(self) -> str:
+        return (self.root / "vc.log").read_text(encoding="utf-8")
+
+    def test_off_announces_how_to_turn_it_on_and_never_shuts_down(self):
+        self.write_cfg("false")
+        self.run_main()
+        self.assertEqual(self.commands, [])
+        self.assertIn("auto shutdown: OFF", self.log_text())
+        self.assertIn("shutdown_when_done = true", self.log_text())
+
+    def test_flipping_the_flag_mid_run_still_takes_effect(self):
+        self.write_cfg("false")
+        real = cli._run_serial
+
+        def flip(ctx, todo):
+            self.write_cfg("true")  # 用户在压缩过程中改了配置
+            return real(ctx, todo)
+
+        with mock.patch.object(cli, "_run_serial", flip):
+            self.run_main()
+        self.assertEqual(self.commands, [["fake-shutdown"]])
+        self.assertIn("shutdown_when_done = false",
+                      self.cfg_path.read_text(encoding="utf-8"))
+        self.assertIn("reset [run] shutdown_when_done = false", self.log_text())
+
+    def test_dry_run_never_shuts_down(self):
+        self.write_cfg("true")
+        self.run_main(["--dry-run"])
+        self.assertEqual(self.commands, [])
+        self.assertIn("shutdown_when_done = true",
+                      self.cfg_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":
