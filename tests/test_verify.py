@@ -337,6 +337,16 @@ class VmafSpotCheckTests(unittest.TestCase):
             self.assertGreaterEqual(start, 0.0)
             self.assertLessEqual(start, 8.0)
 
+    def test_short_file_is_not_measured_five_times(self):
+        """片子比样本还短时几段会挤到同一个切点，量一次就够。"""
+        self.cfg["verify"]["vmaf_segments"] = 5
+        self.cfg["verify"]["vmaf_sample_seconds"] = 20
+        mean, msg = self.check(duration=10.0)
+        self.assertEqual(msg, "")
+        self.assertAlmostEqual(mean, 96.0)
+        self.assertEqual(len(self.extracted), 2,
+                         "1 segment x ref+dist, not 5 copies of the same one")
+
     def test_reference_and_distorted_share_one_cut_point(self):
         self.check(fps=24000 / 1001)
         starts = [s for _n, s in self.extracted]

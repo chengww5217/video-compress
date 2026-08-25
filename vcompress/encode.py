@@ -797,12 +797,17 @@ def _vmaf_run(ffmpeg: str, distorted: Path, reference: Path, shift: int,
         return _pooled_score(data, pool)
 
 
-def sample_starts(duration: float, seconds: float, count: int) -> list:
+def sample_starts(duration: float, seconds: float, count: int,
+                  fps: float = 0.0) -> list:
     """把 count 段样本均匀铺在整片上，返回每段的起点。
 
     只取中间一段是不够的：一部片子的中点可能是明亮的动作戏，也可能是全黑的
     过场，按它定的 CRF 拿到暗场或高动态段就不成立了。均匀铺开并按最差段决策，
     才和后面用多段抽检的校验是同一个口径。
+
+    自适应搜索和 VMAF 抽检共用这一个函数：两处各写一份的时候，一份有帧对齐、
+    另一份有去重，铺开的位置却要求是同一套口径，迟早对不上。给了 fps 就把切
+    点挪到帧间隙（见 frame_aligned_start），抽检那边必须这么做。
     """
     count = max(1, count)
     if duration <= 0:
@@ -812,8 +817,8 @@ def sample_starts(duration: float, seconds: float, count: int) -> list:
     for i in range(count):
         frac = (i + 0.5) / count
         start = max(0.0, min(duration - span, duration * frac - span / 2))
-        starts.append(start)
-    # 片子太短时几段会挤在一起，去重免得白编同一段
+        starts.append(frame_aligned_start(start, fps) if fps > 0 else start)
+    # 片子太短时几段会挤在一起，去重免得白量/白编同一段
     unique = []
     for start in starts:
         if all(abs(start - kept) > 0.25 for kept in unique):

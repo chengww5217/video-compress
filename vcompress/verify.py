@@ -156,17 +156,14 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
         return None, "unknown duration, cannot pick sample points"
 
     records = []
+    starts = encode.sample_starts(duration, seconds, segments, fps=fps)
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         root = Path(td)
-        for i in range(segments):
-            frac = (i + 0.5) / segments
-            start = max(0.0, min(duration - seconds, duration * frac - seconds / 2))
-            # 两个文件用同一个切点，且切在帧间隙里，抽出的段才逐帧对应
-            start = encode.frame_aligned_start(start, fps)
+        for i, start in enumerate(starts):
             ref = root / f"ref{i}.mkv"
             dist = root / f"dist{i}.mkv"
             if log:
-                log.info(f"vmaf spot check: segment {i + 1}/{segments}")
+                log.info(f"vmaf spot check: segment {i + 1}/{len(starts)}")
             try:
                 encode.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
                                        lossless_codec)

@@ -802,6 +802,16 @@ class SampleStartsTests(unittest.TestCase):
     def test_count_is_clamped_to_at_least_one(self):
         self.assertEqual(len(encode.sample_starts(600.0, 10.0, 0)), 1)
 
+    def test_given_fps_the_cuts_land_between_frames(self):
+        """抽检那边必须帧对齐；两份实现合并后由这个参数控制。"""
+        fps = 24000 / 1001
+        for start in encode.sample_starts(1200.0, 10.0, 4, fps=fps):
+            self.assertAlmostEqual((start * fps) % 1.0, 0.5, places=2)
+
+    def test_alignment_does_not_defeat_the_deduplication(self):
+        starts = encode.sample_starts(8.0, 10.0, 4, fps=24000 / 1001)
+        self.assertEqual(len(starts), 1)
+
 
 class ProbeCrfTests(unittest.TestCase):
     """一个 CRF 的分数取最差段，而不是平均。"""
