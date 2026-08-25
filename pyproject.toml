@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vcompress"
+version = "1.0.0"
+description = "ffmpeg-based batch video compressor that only deletes originals after verification"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = []
+
+[project.optional-dependencies]
+# 只有 --recycle（删除进回收站）需要；缺失时会退化为直接删除并告警
+recycle = ["Send2Trash>=1.8.2"]
+
+[project.scripts]
+vcompress = "vcompress.cli:main"
+
+[tool.setuptools]
+packages = ["vcompress"]
+
+[tool.setuptools.package-data]
+vcompress = []

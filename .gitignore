@@ -3,3 +3,9 @@ logs/
 results.jsonl
 *.tmp.mkv
 *.tmp.mp4
+*.failed.mkv
+*.failed.mp4
+build/
+dist/
+*.egg-info/
+.venv/
