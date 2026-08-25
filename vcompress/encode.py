@@ -635,6 +635,53 @@ def _vmaf_run(ffmpeg: str, distorted: Path, reference: Path, shift: int,
         return _pooled_score(data, pool)
 
 
+def sample_starts(duration: float, seconds: float, count: int) -> list:
+    """把 count 段样本均匀铺在整片上，返回每段的起点。
+
+    只取中间一段是不够的：一部片子的中点可能是明亮的动作戏，也可能是全黑的
+    过场，按它定的 CRF 拿到暗场或高动态段就不成立了。均匀铺开并按最差段决策，
+    才和后面用多段抽检的校验是同一个口径。
+    """
+    count = max(1, count)
+    if duration <= 0:
+        return [0.0]
+    span = min(seconds, duration)
+    starts = []
+    for i in range(count):
+        frac = (i + 0.5) / count
+        start = max(0.0, min(duration - span, duration * frac - span / 2))
+        starts.append(start)
+    # 片子太短时几段会挤在一起，去重免得白编同一段
+    unique = []
+    for start in starts:
+        if all(abs(start - kept) > 0.25 for kept in unique):
+            unique.append(start)
+    return unique
+
+
+def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
+               target: float, model: str, log) -> float:
+    """在所有样本段上试这个 CRF，返回最差段的分数。
+
+    取最差而不是平均：平均分能被好段抬起来，而观感是由最差处决定的。某段已经
+    不达标时后面的段就不用再量了，直接判这个 CRF 不行。
+    """
+    worst = None
+    for i, ref in enumerate(refs):
+        sample = root / f"s{crf}_{i}.mkv"
+        try:
+            encode_sample(tools.ffmpeg, ref, crf, enc_cfg, sample)
+            score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
+        finally:
+            sample.unlink(missing_ok=True)
+        log.debug(f"adaptive probe: crf={crf} segment {i + 1}/{len(refs)} "
+                  f"vmaf={score:.2f}")
+        worst = score if worst is None else min(worst, score)
+        if worst < target:
+            break
+    return worst if worst is not None else 0.0
+
+
 def pick_crf_adaptive(tools, src: Path, duration: float,
                       enc_cfg: dict, ad_cfg: dict, log,
                       lossless_codec: str = "libx264",
@@ -643,42 +690,45 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
     lo = int(ad_cfg.get("crf_min", 16))
     hi = int(ad_cfg.get("crf_max", 44))
     step = max(1, int(ad_cfg.get("search_step", 2)))
-    seconds = to_float(ad_cfg.get("sample_seconds"), 30.0)
+    seconds = to_float(ad_cfg.get("sample_seconds"), 10.0)
+    count = max(1, to_int(ad_cfg.get("sample_count"), 4))
 
-    center = max(0.0, duration / 2 - seconds / 2)
+    starts = sample_starts(duration, seconds, count)
     best = None
-    log.info(f"adaptive search: extracting reference segment "
-             f"({seconds:.0f}s around mid-point of {src.name})")
+    log.info(f"adaptive search: extracting {len(starts)} reference segment(s) "
+             f"of {seconds:.0f}s from {src.name}")
     tmpdir = tempfile.TemporaryDirectory(prefix="vcadapt_")
     try:
         root = Path(tmpdir.name)
-        ref = root / "ref.mkv"
-        extract_segment(tools.ffmpeg, src, center, min(seconds, duration), ref,
-                        lossless_codec)
+        refs = []
+        for i, start in enumerate(starts):
+            ref = root / f"ref{i}.mkv"
+            extract_segment(tools.ffmpeg, src, start, min(seconds, duration),
+                            ref, lossless_codec)
+            refs.append(ref)
 
         while hi - lo > step:
             mid = (lo + hi) // 2
-            sample = root / f"s{mid}.mkv"
-            encode_sample(tools.ffmpeg, ref, mid, enc_cfg, sample)
-            score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
-            log.info(f"adaptive probe: crf={mid} vmaf={score:.2f} "
-                     f"(target {target})")
+            score = _probe_crf(tools, refs, mid, enc_cfg, root, target,
+                               model, log)
+            log.info(f"adaptive probe: crf={mid} worst-segment vmaf="
+                     f"{score:.2f} (target {target})")
             if score >= target:
                 best = mid
                 lo = mid
             else:
                 hi = mid
         if best is None:
-            sample = root / "smin.mkv"
-            encode_sample(tools.ffmpeg, ref, lo, enc_cfg, sample)
-            score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
+            score = _probe_crf(tools, refs, lo, enc_cfg, root, target,
+                               model, log)
             if score < target:
                 log.warning(
                     f"even crf={lo} only reaches vmaf={score:.2f} "
                     f"< {target}; using crf={lo}"
                 )
             best = lo
-        log.info(f"adaptive crf selected: {best} (target vmaf {target})")
+        log.info(f"adaptive crf selected: {best} (target vmaf {target}, "
+                 f"worst of {len(refs)} segment(s))")
         return best
     except (EncodeError, OSError) as e:
         log.warning(f"adaptive crf search failed ({e}); falling back to default")

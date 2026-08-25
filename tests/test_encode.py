@@ -2,6 +2,8 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import logging
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -597,6 +599,72 @@ class SegmentStreamSelectionTests(unittest.TestCase):
                                  Path("o.mkv"), "ffv1")
         self.assertIn("ffv1", cmd)
         self.assertNotIn("-crf", cmd)
+
+
+class SampleStartsTests(unittest.TestCase):
+    """搜索样本必须铺开：只看中点会被一段明亮动作戏或全黑过场带偏。"""
+
+    def test_segments_are_spread_over_the_file(self):
+        starts = encode.sample_starts(1200.0, 10.0, 4)
+        self.assertEqual([round(s) for s in starts], [145, 445, 745, 1045])
+
+    def test_single_segment_lands_in_the_middle(self):
+        self.assertEqual(encode.sample_starts(600.0, 30.0, 1), [285.0])
+
+    def test_never_starts_past_the_end(self):
+        for start in encode.sample_starts(20.0, 10.0, 4):
+            self.assertLessEqual(start, 10.0)
+            self.assertGreaterEqual(start, 0.0)
+
+    def test_short_file_collapses_to_one_segment(self):
+        """片子比样本还短时几段会挤在一起，别把同一段编四遍。"""
+        self.assertEqual(encode.sample_starts(8.0, 10.0, 4), [0.0])
+
+    def test_unknown_duration_is_safe(self):
+        self.assertEqual(encode.sample_starts(0.0, 10.0, 4), [0.0])
+
+    def test_count_is_clamped_to_at_least_one(self):
+        self.assertEqual(len(encode.sample_starts(600.0, 10.0, 0)), 1)
+
+
+class ProbeCrfTests(unittest.TestCase):
+    """一个 CRF 的分数取最差段，而不是平均。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.refs = [self.root / f"ref{i}.mkv" for i in range(3)]
+        self.encoded = []
+        self.orig_encode = encode.encode_sample
+        self.orig_score = encode.vmaf_score
+        encode.encode_sample = lambda ff, ref, crf, cfg, out: \
+            self.encoded.append(Path(ref).name)
+        encode.vmaf_score = self.fake_score
+        self.log = logging.getLogger("probe-crf-test")
+        self.log.addHandler(logging.NullHandler())
+
+    def tearDown(self):
+        encode.encode_sample = self.orig_encode
+        encode.vmaf_score = self.orig_score
+        self.tmp.cleanup()
+
+    def fake_score(self, ff, dist, ref, shift=0, **kw):
+        return self.scores[len(self.encoded) - 1]
+
+    def probe(self, crf=30, target=95.0):
+        return encode._probe_crf(helpers.FakeTools(), self.refs, crf, {},
+                                 self.root, target, "", self.log)
+
+    def test_worst_segment_decides(self):
+        self.scores = [99.0, 96.0, 95.5]
+        self.assertAlmostEqual(self.probe(), 95.5)
+        self.assertEqual(len(self.encoded), 3)
+
+    def test_stops_at_the_first_failing_segment(self):
+        self.scores = [99.0, 80.0, 99.0]
+        self.assertAlmostEqual(self.probe(), 80.0)
+        self.assertEqual(len(self.encoded), 2,
+                         "already below target, no point measuring the rest")
 
 
 class AdaptiveFallbackTests(unittest.TestCase):

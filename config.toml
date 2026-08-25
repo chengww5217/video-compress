@@ -47,7 +47,8 @@ enabled = true
 target_vmaf = 95.0
 crf_min = 16
 crf_max = 44
-sample_seconds = 30
+sample_seconds = 10
+sample_count = 4
 search_step = 2
 
 [audio]

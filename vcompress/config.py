@@ -52,7 +52,8 @@ DEFAULTS = {
         "target_vmaf": 95.0,
         "crf_min": 16,
         "crf_max": 44,
-        "sample_seconds": 30,
+        "sample_seconds": 10,
+        "sample_count": 4,
         "search_step": 2,
     },
     "audio": {
@@ -217,6 +218,8 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[adaptive] target_vmaf must be within (0, 100]")
     if int(ad["sample_seconds"]) <= 0:
         errors.append("[adaptive] sample_seconds must be positive")
+    if int(ad["sample_count"]) < 1:
+        errors.append("[adaptive] sample_count must be at least 1")
     if int(ad["search_step"]) < 1:
         errors.append("[adaptive] search_step must be at least 1")
 
