@@ -50,15 +50,6 @@ DEFAULTS = {
             "extra": "-x265-params aq-mode=3:psy-rd=2.0",
         },
     },
-    "analyze": {
-        # 编码前解一遍源文件，按探查结果决定滤镜链（反交错、裁黑边）
-        "enabled": True,
-        "deinterlace": "auto",   # auto | off
-        "skip_telecine": True,   # telecine 需要 IVTC，本工具不做，默认跳过
-        "crop": "auto",          # auto | off
-        "crop_limit": 16,        # 判黑的亮度阈值（0~255），越大裁得越狠
-        "crop_min_pixels": 8,    # 至少要去掉这么多行/列才值得裁
-    },
     "adaptive": {
         "enabled": True,
         "target_vmaf": 95.0,
@@ -233,26 +224,7 @@ def _check_encoders(cfg: dict, errors: list):
                       f"{', '.join(names)})")
 
 
-CHOICES = {
-    ("analyze", "deinterlace"): ("auto", "off"),
-    ("analyze", "crop"): ("auto", "off"),
-    ("audio", "lossless"): ("flac", "opus"),
-}
-
-
 def _check_semantics(cfg: dict, errors: list):
-    for (section, key), allowed in CHOICES.items():
-        value = str(cfg[section][key]).lower()
-        if value not in allowed:
-            errors.append(f"[{section}] {key} must be one of "
-                          f"{', '.join(allowed)}")
-
-    an = cfg["analyze"]
-    if not 0 <= int(an["crop_limit"]) <= 255:
-        errors.append("[analyze] crop_limit must be within [0, 255]")
-    if int(an["crop_min_pixels"]) < 0:
-        errors.append("[analyze] crop_min_pixels cannot be negative")
-
     ad = cfg["adaptive"]
     if ad["crf_min"] >= ad["crf_max"]:
         errors.append("[adaptive] crf_min must be smaller than crf_max")
@@ -305,6 +277,8 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[audio] opus_kbps must be positive")
     if int(audio["transcode_over_kbps"]) <= 0:
         errors.append("[audio] transcode_over_kbps must be positive")
+    if str(audio["lossless"]).lower() not in ("flac", "opus"):
+        errors.append('[audio] lossless must be "flac" or "opus"')
 
 
 def validate(cfg: dict) -> dict:

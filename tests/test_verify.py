@@ -130,7 +130,7 @@ class CheckBasicTests(unittest.TestCase):
                         width=1280, height=720)
         ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("1280x720 is not the expected 1920x1080", msg)
+        self.assertIn("resolution changed 1920x1080 -> 1280x720", msg)
 
     def test_unknown_resolution_is_not_a_failure(self):
         out = make_info(video_codec="av1", duration=600.0, width=0, height=0)
@@ -249,9 +249,8 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.shifts = []
         self.orig_extract = encode.extract_segment
         self.orig_score = encode.vmaf_score
-        encode.extract_segment = lambda ff, src, start, secs, out, \
-            codec="libx264", vf="": \
-            self.extracted.append((Path(src).name, round(start, 3), vf))
+        encode.extract_segment = lambda ff, src, start, secs, out, codec="libx264": \
+            self.extracted.append((Path(src).name, round(start, 3)))
         encode.vmaf_score = self.fake_score
 
     def fake_score(self, ff, dist, ref, shift=0, **kw):
@@ -262,19 +261,10 @@ class VmafSpotCheckTests(unittest.TestCase):
         encode.extract_segment = self.orig_extract
         encode.vmaf_score = self.orig_score
 
-    def check(self, duration=600.0, fps=0.0, vf=""):
+    def check(self, duration=600.0, fps=0.0):
         return verify.vmaf_spot_check(FakeTools(), Path("a.mkv"),
                                       Path("b.mkv"), duration, self.cfg,
-                                      fps=fps, vf=vf)
-
-    def test_filters_apply_to_the_reference_only(self):
-        """产物已经是滤镜之后的画面，只有源侧参考段需要过同一条滤镜链。"""
-        self.check(vf="crop=1920:800:0:140")
-        by_name = {}
-        for name, _start, vf in self.extracted:
-            by_name.setdefault(name, set()).add(vf)
-        self.assertEqual(by_name["a.mkv"], {"crop=1920:800:0:140"}, "source side")
-        self.assertEqual(by_name["b.mkv"], {""}, "output side must not refilter")
+                                      fps=fps)
 
     def test_disabled_is_not_reported_as_unavailable(self):
         self.cfg["verify"]["vmaf_enabled"] = False
@@ -343,13 +333,13 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_sample_never_starts_past_the_end(self):
         self.check(duration=8.0)
-        for _name, start, _vf in self.extracted:
+        for _name, start in self.extracted:
             self.assertGreaterEqual(start, 0.0)
             self.assertLessEqual(start, 8.0)
 
     def test_reference_and_distorted_share_one_cut_point(self):
         self.check(fps=24000 / 1001)
-        starts = [s for _n, s, _vf in self.extracted]
+        starts = [s for _n, s in self.extracted]
         self.assertEqual(starts[0], starts[1], "ref/dist must be cut alike")
         self.assertEqual(starts[2], starts[3])
 
@@ -357,7 +347,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         """切点必须落在帧间隙里，否则容器时间戳取整会让两边错开一帧。"""
         fps = 24000 / 1001
         self.check(fps=fps)
-        for _name, start, _vf in self.extracted:
+        for _name, start in self.extracted:
             offset = (start * fps) % 1.0
             self.assertAlmostEqual(offset, 0.5, places=2,
                                    msg=f"{start}s sits on a frame boundary")

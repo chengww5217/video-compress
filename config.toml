@@ -44,14 +44,6 @@ crf = 20
 min_bit_depth = 10
 extra = "-x265-params aq-mode=3:psy-rd=2.0"
 
-[analyze]
-enabled = true
-deinterlace = "auto"
-skip_telecine = true
-crop = "auto"
-crop_limit = 16
-crop_min_pixels = 8
-
 [adaptive]
 enabled = true
 target_vmaf = 95.0
