@@ -114,6 +114,96 @@ class AudioArgsTests(unittest.TestCase):
         self.assertEqual(encode.flac_bitrate("truehd", 0), 0)
 
 
+class FractionalCrfTests(unittest.TestCase):
+    """1 级 CRF ≈ 8% 体积，只搜整数等于平均白扔半级 ≈ 4%。"""
+
+    def av1(self, **kw):
+        return dict(make_cfg()["encode"]["av1"], **kw)
+
+    def test_quantize_to_quarter_steps(self):
+        self.assertEqual(encode.quantize_crf(35.1), 35)
+        self.assertEqual(encode.quantize_crf(35.2), 35.25)
+        self.assertEqual(encode.quantize_crf(35.9), 36)
+        self.assertEqual(encode.quantize_crf(35), 35)
+
+    def test_integer_crf_uses_the_plain_flag(self):
+        args = encode.video_args(self.av1(extra="-svtav1-params tune=0"), 35)
+        self.assertEqual(args[args.index("-crf") + 1], "35")
+        self.assertEqual(args[args.index("-svtav1-params") + 1], "tune=0")
+
+    def test_svtav1_fraction_goes_into_the_params(self):
+        """-crf 对 libsvtav1 是整数选项，小数只能走 svtav1-params。"""
+        args = encode.video_args(self.av1(extra="-svtav1-params tune=0"), 35.75)
+        self.assertEqual(args[args.index("-svtav1-params") + 1],
+                         "tune=0:crf=35.75")
+        # 整数那个留着给忽略 params 的老构建兜底（实测 params 会覆盖它）
+        self.assertEqual(args[args.index("-crf") + 1], "35")
+
+    def test_existing_tuning_params_are_kept(self):
+        extra = ("-svtav1-params tune=0:enable-variance-boost=1:"
+                 "qp-scale-compress-strength=1")
+        args = encode.video_args(self.av1(extra=extra), 41.25)
+        params = args[args.index("-svtav1-params") + 1]
+        self.assertTrue(params.startswith("tune=0:enable-variance-boost=1:"
+                                          "qp-scale-compress-strength=1"))
+        self.assertTrue(params.endswith(":crf=41.25"))
+
+    def test_params_switch_is_added_when_missing(self):
+        args = encode.video_args(self.av1(extra=""), 30.5)
+        self.assertEqual(args[args.index("-svtav1-params") + 1], "crf=30.5")
+
+    def test_an_existing_crf_param_is_replaced_not_duplicated(self):
+        args = encode.video_args(
+            self.av1(extra="-svtav1-params crf=20:tune=0"), 30.5)
+        params = args[args.index("-svtav1-params") + 1]
+        self.assertEqual(params.count("crf="), 1)
+        self.assertIn("tune=0", params)
+        self.assertIn("crf=30.5", params)
+
+    def test_x265_takes_a_float_crf_directly(self):
+        cfg = dict(make_cfg()["encode"]["x265"])
+        args = encode.video_args(cfg, 27.75)
+        self.assertEqual(args[args.index("-crf") + 1], "27.75")
+        self.assertNotIn("-svtav1-params", args)
+
+    def test_unknown_encoder_falls_back_to_an_integer(self):
+        cfg = {"codec": "libvpx-vp9", "preset": "0", "crf": 30, "extra": ""}
+        args = encode.video_args(cfg, 30.75)
+        self.assertEqual(args[args.index("-crf") + 1], "31")
+
+    def test_config_is_not_mutated(self):
+        cfg = self.av1(extra="-svtav1-params tune=0")
+        encode.video_args(cfg, 35.75)
+        self.assertEqual(cfg["extra"], "-svtav1-params tune=0")
+
+
+class SearchMidpointTests(unittest.TestCase):
+    def test_quarter_step_search_converges(self):
+        lo, hi, step = 16, 50, 0.25
+        seen = []
+        while hi - lo > step:
+            mid = encode.search_midpoint(lo, hi, step)
+            self.assertLess(lo, mid)
+            self.assertLess(mid, hi)
+            seen.append(mid)
+            hi = mid          # 一直往下收，最坏情况
+            self.assertLess(len(seen), 60, "search must terminate")
+        self.assertEqual(encode.quantize_crf(lo + step), encode.quantize_crf(hi))
+
+    def test_midpoint_lands_on_the_grid(self):
+        for _ in range(1):
+            mid = encode.search_midpoint(16, 50, 0.25)
+            self.assertEqual(mid, encode.quantize_crf(mid))
+
+    def test_coarse_step_snaps_to_that_grid(self):
+        """粗步长时中点落在步长网格上（33 不在 2 的网格上，取 32）。"""
+        self.assertEqual(encode.search_midpoint(16, 50, 2), 32)
+
+    def test_narrow_range_stays_inside(self):
+        mid = encode.search_midpoint(35, 35.5, 0.25)
+        self.assertEqual(mid, 35.25)
+
+
 class VideoArgsTests(unittest.TestCase):
     def setUp(self):
         self.cfg = make_cfg()

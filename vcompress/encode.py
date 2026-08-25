@@ -371,16 +371,72 @@ def subtitle_args(info, container: str) -> list:
 
 # ------------------------------------------------------------------ 命令行拼装
 
-def video_args(encoder_cfg: dict, crf: int) -> list:
+# CRF 的实际可用粒度。SVT-AV1 的 --crf 接受 0.25 的增量，x265 接受任意小数；
+# 统一按 0.25 对齐，比这更细对 AV1 没有意义（编码器自己会对齐回来）。
+# 为什么要小数：本机实测 1 级 CRF ≈ 8% 体积，0.25 级 ≈ 2%。只搜整数等于平均
+# 白扔半级 ≈ 4% 的体积，而画质闸门一点没变——纯亏。
+CRF_GRID = 0.25
+
+
+def quantize_crf(crf: float) -> float:
+    """把 CRF 对齐到 0.25 的网格，并去掉 35.0 这种多余的小数。"""
+    value = round(float(crf) / CRF_GRID) * CRF_GRID
+    return int(value) if float(value).is_integer() else round(value, 2)
+
+
+def fmt_crf(crf) -> str:
+    return str(int(crf)) if float(crf).is_integer() else f"{float(crf):g}"
+
+
+def with_svtav1_param(extra: str, key: str, value: str) -> str:
+    """往 -svtav1-params 里塞一个键，没有这个开关就补一个。
+
+    不能简单在命令行上再加一个 `-svtav1-params`：它是一个字典型选项，第二个
+    会把第一个整个顶掉，`extra` 里那一串调优参数就全丢了。
+    """
+    tokens = shlex.split(extra or "")
+    setting = f"{key}={value}"
+    if "-svtav1-params" in tokens:
+        i = tokens.index("-svtav1-params") + 1
+        if i < len(tokens):
+            kept = [p for p in tokens[i].split(":")
+                    if p and not p.startswith(f"{key}=")]
+            tokens[i] = ":".join(kept + [setting])
+            return shlex.join(tokens)
+    return shlex.join(tokens + ["-svtav1-params", setting])
+
+
+def crf_args(encoder_cfg: dict, crf) -> tuple:
+    """返回 (命令行参数, 改写后的 extra)。
+
+    小数 CRF 各家的下发方式不同：libx265 的 `-crf` 本身就是浮点，libsvtav1 的
+    `-crf` 是整数、只能走 `-svtav1-params crf=`（实测 params 会覆盖 -crf，所以
+    整数那个仍然留着，给忽略这个参数的老构建兜底）。不认识的编码器取整，宁可
+    少省一点也不要编出一个 CRF 完全不对的文件。
+    """
+    codec = encoder_cfg["codec"]
+    extra = encoder_cfg.get("extra", "")
+    crf = quantize_crf(crf)
+    if float(crf).is_integer():
+        return ["-crf", str(int(crf))], extra
+    if codec == "libsvtav1":
+        return (["-crf", str(int(crf))],
+                with_svtav1_param(extra, "crf", fmt_crf(crf)))
+    if codec == "libx265":
+        return ["-crf", f"{float(crf):.2f}"], extra
+    return ["-crf", str(int(round(crf)))], extra
+
+
+def video_args(encoder_cfg: dict, crf) -> list:
+    crf_flags, extra = crf_args(encoder_cfg, crf)
     args = [
         "-c:v", encoder_cfg["codec"],
         "-preset", str(encoder_cfg["preset"]),
-        "-crf", str(crf),
+        *crf_flags,
     ]
     pix_fmt = encoder_cfg.get("pix_fmt")
     if pix_fmt:
         args += ["-pix_fmt", pix_fmt]
-    extra = encoder_cfg.get("extra", "")
     if extra:
         args.extend(shlex.split(extra))
     return args
@@ -770,15 +826,15 @@ class CrfChoice:
     信息能在编码开始前就判断「这文件值不值得压几个小时」。
     """
 
-    crf: int
+    crf: float
     video_bitrate: int = 0
     meets_target: bool = True
     worst_vmaf: float = 0.0
 
 
-def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
+def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
                target: float, model: str, log) -> tuple:
-    """在所有样本段上试这个 CRF，返回 (最差段分数, 样本码率 bps)。
+    """在所有样本段上试这个 CRF，返回 (最差段分数, 样本总字节, 量过的段数)。
 
     取最差而不是平均：平均分能被好段抬起来，而观感是由最差处决定的。某段已经
     不达标时后面的段就不用再量了，直接判这个 CRF 不行。
@@ -786,8 +842,9 @@ def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
     worst = None
     total_bytes = 0
     measured = 0
+    tag = fmt_crf(crf).replace(".", "_")
     for i, ref in enumerate(refs):
-        sample = root / f"s{crf}_{i}.mkv"
+        sample = root / f"s{tag}_{i}.mkv"
         try:
             encode_sample(tools.ffmpeg, ref, crf, enc_cfg, sample)
             size = sample.stat().st_size
@@ -796,12 +853,21 @@ def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
             sample.unlink(missing_ok=True)
         total_bytes += size
         measured += 1
-        log.debug(f"adaptive probe: crf={crf} segment {i + 1}/{len(refs)} "
-                  f"vmaf={score:.2f} {size} bytes")
+        log.debug(f"adaptive probe: crf={fmt_crf(crf)} segment "
+                  f"{i + 1}/{len(refs)} vmaf={score:.2f} {size} bytes")
         worst = score if worst is None else min(worst, score)
         if worst < target:
             break
     return (worst if worst is not None else 0.0), total_bytes, measured
+
+
+def search_midpoint(lo: float, hi: float, step: float) -> float:
+    """二分的中点，对齐到步长网格且严格落在 (lo, hi) 内，保证循环收敛。"""
+    mid = quantize_crf(lo + (hi - lo) / 2)
+    if step >= CRF_GRID:
+        mid = round(mid / step) * step
+        mid = quantize_crf(mid)
+    return min(max(mid, quantize_crf(lo + step)), quantize_crf(hi - step))
 
 
 def pick_crf_adaptive(tools, src: Path, duration: float,
@@ -809,9 +875,9 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
                       lossless_codec: str = "libx264",
                       model: str = "") -> "CrfChoice | None":
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
-    lo = int(ad_cfg.get("crf_min", 16))
-    hi = int(ad_cfg.get("crf_max", 44))
-    step = max(1, int(ad_cfg.get("search_step", 2)))
+    lo = quantize_crf(to_float(ad_cfg.get("crf_min"), 16))
+    hi = quantize_crf(to_float(ad_cfg.get("crf_max"), 50))
+    step = max(CRF_GRID, to_float(ad_cfg.get("search_step"), CRF_GRID))
     seconds = to_float(ad_cfg.get("sample_seconds"), 10.0)
     count = max(1, to_int(ad_cfg.get("sample_count"), 4))
 
@@ -831,10 +897,10 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
             refs.append(ref)
 
         while hi - lo > step:
-            mid = (lo + hi) // 2
+            mid = search_midpoint(lo, hi, step)
             score, sample_bytes, measured = _probe_crf(
                 tools, refs, mid, enc_cfg, root, target, model, log)
-            log.info(f"adaptive probe: crf={mid} worst-segment vmaf="
+            log.info(f"adaptive probe: crf={fmt_crf(mid)} worst-segment vmaf="
                      f"{score:.2f} (target {target})")
             if score >= target:
                 best = CrfChoice(mid, _sample_bitrate(sample_bytes, span,
@@ -847,14 +913,15 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
                 tools, refs, lo, enc_cfg, root, target, model, log)
             if score < target:
                 log.warning(
-                    f"even crf={lo} only reaches vmaf={score:.2f} "
+                    f"even crf={fmt_crf(lo)} only reaches vmaf={score:.2f} "
                     f"< {target}"
                 )
             best = CrfChoice(lo, _sample_bitrate(sample_bytes, span, measured),
                              score >= target, score)
-        log.info(f"adaptive crf selected: {best.crf} (target vmaf {target}, "
-                 f"worst of {len(refs)} segment(s) {best.worst_vmaf:.2f}, "
-                 f"sampled {best.video_bitrate // 1000} kbps)")
+        log.info(f"adaptive crf selected: {fmt_crf(best.crf)} (target vmaf "
+                 f"{target}, worst of {len(refs)} segment(s) "
+                 f"{best.worst_vmaf:.2f}, sampled "
+                 f"{best.video_bitrate // 1000} kbps)")
         return best
     except (EncodeError, OSError) as e:
         log.warning(f"adaptive crf search failed ({e}); falling back to default")

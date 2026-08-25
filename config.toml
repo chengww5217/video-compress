@@ -51,7 +51,7 @@ crf_min = 16
 crf_max = 50
 sample_seconds = 10
 sample_count = 4
-search_step = 1
+search_step = 0.25
 require_target = true
 
 [audio]

@@ -57,7 +57,7 @@ DEFAULTS = {
         "crf_max": 50,
         "sample_seconds": 10,
         "sample_count": 4,
-        "search_step": 1,
+        "search_step": 0.25,
         "require_target": True,
     },
     "audio": {
@@ -94,7 +94,7 @@ DEFAULTS = {
 ENCODER_KEYS = {
     "codec": str,
     "preset": (str, int),
-    "crf": int,
+    "crf": (int, float),
     "extra": str,
     # 留空表示按源片自动决定；只在源像素格式该编码器不支持时才需要手动指定
     "pix_fmt": str,
@@ -234,8 +234,9 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[adaptive] sample_seconds must be positive")
     if int(ad["sample_count"]) < 1:
         errors.append("[adaptive] sample_count must be at least 1")
-    if int(ad["search_step"]) < 1:
-        errors.append("[adaptive] search_step must be at least 1")
+    if float(ad["search_step"]) < 0.25:
+        errors.append("[adaptive] search_step must be at least 0.25 "
+                      "(CRF 的实际可用粒度)")
 
     vf = cfg["verify"]
     if not 0 < float(vf["vmaf_threshold"]) <= 100:
