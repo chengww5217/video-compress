@@ -613,6 +613,7 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
 
 
 def _run_quiet(cmd: list) -> tuple:
+    """跑一个不需要进度的 ffmpeg，只关心退出码和 stderr 尾巴。"""
     rc, _out, err = proc.run_managed(cmd)
     return rc, err
 

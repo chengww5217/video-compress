@@ -139,10 +139,6 @@ class OutputRegistry:
             for path in [p for p, o in self._owner.items() if o == owner_key]:
                 del self._owner[path]
 
-    def reserved(self) -> set:
-        with self._lock:
-            return set(self._owner)
-
 
 def keep_failed_output(tmp: Path, src: Path, out_ext: str):
     """校验没过时按需留下产物，别让几小时的编码结果直接消失。

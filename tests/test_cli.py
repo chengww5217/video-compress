@@ -57,8 +57,7 @@ class PreflightTests(unittest.TestCase):
     def run_preflight(self, encoders, filters, adaptive=True):
         caps = encode.Caps(encoders=frozenset(encoders),
                            filters=frozenset(filters))
-        return cli.preflight(helpers.FakeTools(), caps, self.cfg, "av1",
-                             adaptive), caps
+        return cli.preflight(caps, self.cfg, "av1", adaptive), caps
 
     def messages(self):
         return "\n".join(self.logs)

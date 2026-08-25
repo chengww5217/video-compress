@@ -44,7 +44,7 @@ def setup_logging(log_file: Path, max_bytes: int = 5_242_880,
     root.addHandler(fh)
 
 
-def preflight(tools, caps: encode.Caps, cfg: dict, encoder: str,
+def preflight(caps: encode.Caps, cfg: dict, encoder: str,
               adaptive: bool) -> bool:
     """先确认这个 ffmpeg 构建能干活，别等编码到一半才报错。"""
     codec = cfg["encode"][encoder]["codec"]
@@ -194,7 +194,7 @@ def main(argv=None) -> int:
     log.info(f"ffmpeg: {tools.ffmpeg}")
 
     caps = encode.Caps.probe(tools.ffmpeg)
-    if not preflight(tools, caps, cfg, encoder, args.adaptive):
+    if not preflight(caps, cfg, encoder, args.adaptive):
         return EXIT_FAILED
 
     found = files.gather_files(args.paths, args.recursive,

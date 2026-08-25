@@ -12,10 +12,6 @@ _lock = threading.Lock()
 _cancelled = threading.Event()
 
 
-class ProcessError(RuntimeError):
-    pass
-
-
 def register(proc) -> None:
     with _lock:
         _active_procs.add(proc)
@@ -44,11 +40,6 @@ def is_cancelled() -> bool:
 
 def clear_cancel() -> None:
     _cancelled.clear()
-
-
-def active_count() -> int:
-    with _lock:
-        return len(_active_procs)
 
 
 def spawn(cmd: list, cwd=None, stdout=subprocess.PIPE,
