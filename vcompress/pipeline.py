@@ -14,7 +14,7 @@ from pathlib import Path
 from . import encode, files, probe, proc, verify
 from .progress import ProgressPrinter
 from .results import ResultStore
-from .util import fmt_size
+from .util import fmt_size, to_float
 
 log = logging.getLogger("vcompress")
 
@@ -152,7 +152,8 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
                                         ctx.enc_cfg["codec"])
     enc_cfg = encode.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
 
-    crf = int(enc_cfg["crf"])
+    # 固定 CRF 也走一遍量化：配置里写 20.5 就该按 20.5 编，而不是被截成 20
+    crf = encode.quantize_crf(to_float(enc_cfg["crf"], 28))
     if ctx.adaptive_enabled and info.duration > 0:
         picked = encode.pick_crf_adaptive(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
@@ -170,7 +171,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         info.comment,
         encode.color_args(info),
     )
-    log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
+    log.info(f"[encode] {src.name}: crf={encode.fmt_crf(crf)} ({ctx.encoder})")
     printer(0.0)
     t0 = time.monotonic()
     encode.run_encode(cmd, info.duration, printer)
@@ -189,9 +190,9 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
     """
     if not picked.meets_target and ctx.cfg["adaptive"].get("require_target", True):
         raise SkipFile(
-            f"even crf={picked.crf} only reaches vmaf {picked.worst_vmaf:.2f}, "
-            f"below target {ctx.cfg['adaptive']['target_vmaf']}; "
-            f"not worth compressing"
+            f"even crf={encode.fmt_crf(picked.crf)} only reaches vmaf "
+            f"{picked.worst_vmaf:.2f}, below target "
+            f"{ctx.cfg['adaptive']['target_vmaf']}; not worth compressing"
         )
     predicted = encode.predicted_size(info, ctx.cfg,
                                   picked.video_bitrate, ctx.out_ext)
@@ -199,18 +200,19 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
         return
     saving = 1.0 - predicted / info.size
     floor = float(ctx.cfg["skip"].get("min_saving_ratio", 0.15))
-    log.info(f"[predict] {info.path.name}: crf={picked.crf} sampled "
-             f"{picked.video_bitrate // 1000} kbps -> ~{fmt_size(predicted)} "
-             f"({saving:.1%} saving)")
+    log.info(f"[predict] {info.path.name}: crf={encode.fmt_crf(picked.crf)} "
+             f"sampled {picked.video_bitrate // 1000} kbps -> "
+             f"~{fmt_size(predicted)} ({saving:.1%} saving)")
     if saving < floor:
         raise SkipFile(
-            f"sampled crf={picked.crf} predicts {fmt_size(predicted)} "
-            f"({saving:.1%} saving), below required {floor:.0%}"
+            f"sampled crf={encode.fmt_crf(picked.crf)} predicts "
+            f"{fmt_size(predicted)} ({saving:.1%} saving), below required "
+            f"{floor:.0%}"
         )
 
 
 def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
-            crf: int, elapsed: float) -> int:
+            crf: float, elapsed: float) -> int:
     """把临时产物换成正式文件并按配置处理原文件，返回省下的字节数。
 
     输出名在编码前已经定过一次，这里再定一次：几小时里目标名可能被别的东西
@@ -231,7 +233,7 @@ def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
     saving = saved / info.size if info.size else 0.0
     kept = ", original kept" if ctx.keep else ""
     log.info(
-        f"[ok] {src.name}: crf={crf} saved {saving:.1%} "
+        f"[ok] {src.name}: crf={encode.fmt_crf(crf)} saved {saving:.1%} "
         f"({fmt_size(info.size)} -> {fmt_size(new_size)}, "
         f"{elapsed:.0f}s{kept})"
     )

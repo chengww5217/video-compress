@@ -476,7 +476,7 @@ def color_args(info) -> list:
 
 
 def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
-              crf: int, a_args: list, s_args: list, marker: str,
+              crf: float, a_args: list, s_args: list, marker: str,
               original_comment: str = "", c_args: list = None) -> list:
     container = dst.suffix.lower()
     maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
@@ -677,7 +677,8 @@ def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
         raise EncodeError(f"segment extract failed: {err.strip()[-300:]}")
 
 
-def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path):
+def encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
+                  out: Path):
     cmd = [
         ffmpeg, "-hide_banner", "-y",
         "-i", str(ref),
@@ -687,7 +688,8 @@ def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path
     ]
     rc, err = _run_quiet(cmd)
     if rc != 0:
-        raise EncodeError(f"sample encode failed at crf={crf}: {err.strip()[-300:]}")
+        raise EncodeError(f"sample encode failed at crf={fmt_crf(crf)}: "
+                          f"{err.strip()[-300:]}")
 
 
 # Netflix 只发布了 1080p 和 4K 两套模型。默认模型按「1080p 屏幕、3 倍屏高

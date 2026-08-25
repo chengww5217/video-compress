@@ -274,6 +274,55 @@ class PreEncodeRejectTests(PipelineTestCase):
         self.assertEqual(outcome, pipeline.OK)
 
 
+class FractionalCrfTests(PipelineTestCase):
+    """0.25 级 CRF 要一路走到 ffmpeg 命令和记录里，不能在半路被截成整数。"""
+
+    def setUp(self):
+        super().setUp()
+        # 音轨算 0，预估体积才不会把这些用例全判成"不值得压"
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              audio_codecs=[], audio_bitrates=[],
+                              audio_channels=[])
+
+    def capture(self, choice=None):
+        seen = {}
+
+        def run_encode(cmd, duration, cb=None):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(self.encoded)
+
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(run_encode)
+        if choice is None:
+            with p1, p2, p3:
+                pipeline.process_file(ctx, self.src)
+        else:
+            self.cfg["adaptive"]["enabled"] = True
+            with p1, p2, p3, mock.patch.object(pipeline.encode,
+                                              "pick_crf_adaptive",
+                                              return_value=choice):
+                pipeline.process_file(ctx, self.src)
+        return seen["cmd"]
+
+    def test_fractional_crf_from_the_config_is_honoured(self):
+        self.cfg["encode"]["av1"]["crf"] = 20.5
+        cmd = self.capture()
+        self.assertIn("crf=20.5", " ".join(cmd),
+                      "a fixed crf of 20.5 must not be truncated to 20")
+
+    def test_fractional_crf_from_the_search_reaches_ffmpeg(self):
+        cmd = self.capture(encode.CrfChoice(30.25, 400, True, 96.0))
+        self.assertIn("crf=30.25", " ".join(cmd))
+
+    def test_record_keeps_integers_integral(self):
+        self.capture(encode.CrfChoice(30, 400, True, 96.0))
+        self.assertEqual(self.store.last(self.src)["crf"], 30)
+
+    def test_record_keeps_the_fraction(self):
+        self.capture(encode.CrfChoice(30.25, 400, True, 96.0))
+        self.assertEqual(self.store.last(self.src)["crf"], 30.25)
+
+
 class ContextTests(unittest.TestCase):
     def test_context_rejects_unknown_attributes(self):
         """dataclass 而不是空壳类：拼错属性名要立刻炸，而不是运行时才发现。"""
