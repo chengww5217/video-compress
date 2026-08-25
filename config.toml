@@ -50,6 +50,7 @@ crf_max = 44
 sample_seconds = 10
 sample_count = 4
 search_step = 2
+require_target = true
 
 [audio]
 transcode_over_kbps = 512

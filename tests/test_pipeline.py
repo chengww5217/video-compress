@@ -221,6 +221,59 @@ class SkipAndDryRunTests(PipelineTestCase):
                          ["a.mp4", "results.jsonl"])
 
 
+class PreEncodeRejectTests(PipelineTestCase):
+    """搜索完就该知道值不值得压，而不是几小时后在校验里才发现。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["adaptive"]["enabled"] = True
+        # 1000 字节 / 10 秒 = 800 bps 的源；音轨算 0 便于对账
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              audio_codecs=[], audio_bitrates=[],
+                              audio_channels=[])
+
+    def run_with_choice(self, choice):
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(self.fake_encode())
+        with p1, p2, p3, mock.patch.object(pipeline.encode,
+                                           "pick_crf_adaptive",
+                                           return_value=choice):
+            return ctx, pipeline.process_file(ctx, self.src)
+
+    def test_predicted_saving_too_small_skips_before_encoding(self):
+        # 700 bps * 10s / 8 = 875 字节，只省 12.5% < 15%
+        ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 700, True, 96.0))
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertTrue(self.src.exists(), "original must be untouched")
+        self.assertFalse((self.root / "a.mkv").exists())
+        self.assertFalse(self.tmp_file().exists())
+        self.assertIn("below required", self.store.last(self.src)["reason"])
+
+    def test_good_prediction_proceeds(self):
+        # 400 bps -> 500 字节，省 50%
+        _ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 400, True, 96.0))
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded)
+
+    def test_unreachable_target_skips(self):
+        _ctx, outcome = self.run_with_choice(
+            encode.CrfChoice(16, 100, False, 88.0))
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertTrue(self.src.exists())
+        self.assertIn("below target", self.store.last(self.src)["reason"])
+
+    def test_unreachable_target_can_be_allowed(self):
+        self.cfg["adaptive"]["require_target"] = False
+        _ctx, outcome = self.run_with_choice(
+            encode.CrfChoice(16, 100, False, 88.0))
+        self.assertEqual(outcome, pipeline.OK)
+
+    def test_unknown_bitrate_does_not_block(self):
+        """预估不出来时照旧编码，别因为拿不到数就少压文件。"""
+        _ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 0, True, 96.0))
+        self.assertEqual(outcome, pipeline.OK)
+
+
 class ContextTests(unittest.TestCase):
     def test_context_rejects_unknown_attributes(self):
         """dataclass 而不是空壳类：拼错属性名要立刻炸，而不是运行时才发现。"""

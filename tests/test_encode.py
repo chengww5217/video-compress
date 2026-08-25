@@ -637,11 +637,14 @@ class ProbeCrfTests(unittest.TestCase):
         self.encoded = []
         self.orig_encode = encode.encode_sample
         self.orig_score = encode.vmaf_score
-        encode.encode_sample = lambda ff, ref, crf, cfg, out: \
-            self.encoded.append(Path(ref).name)
+        encode.encode_sample = self.fake_encode
         encode.vmaf_score = self.fake_score
         self.log = logging.getLogger("probe-crf-test")
         self.log.addHandler(logging.NullHandler())
+
+    def fake_encode(self, ff, ref, crf, cfg, out):
+        self.encoded.append(Path(ref).name)
+        Path(out).write_bytes(b"x" * 1000)
 
     def tearDown(self):
         encode.encode_sample = self.orig_encode
@@ -657,14 +660,90 @@ class ProbeCrfTests(unittest.TestCase):
 
     def test_worst_segment_decides(self):
         self.scores = [99.0, 96.0, 95.5]
-        self.assertAlmostEqual(self.probe(), 95.5)
+        worst, total, measured = self.probe()
+        self.assertAlmostEqual(worst, 95.5)
+        self.assertEqual((total, measured), (3000, 3))
         self.assertEqual(len(self.encoded), 3)
 
     def test_stops_at_the_first_failing_segment(self):
         self.scores = [99.0, 80.0, 99.0]
-        self.assertAlmostEqual(self.probe(), 80.0)
+        worst, total, measured = self.probe()
+        self.assertAlmostEqual(worst, 80.0)
+        self.assertEqual((total, measured), (2000, 2))
         self.assertEqual(len(self.encoded), 2,
                          "already below target, no point measuring the rest")
+
+    def test_samples_are_deleted_after_measuring(self):
+        self.scores = [99.0, 99.0, 99.0]
+        self.probe()
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), [])
+
+
+class PredictedSizeTests(unittest.TestCase):
+    """编码前的体积预估：宁可估不出来，也不要瞎猜。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def test_video_plus_audio(self):
+        info = make_info(duration=100.0, audio_bitrates=[200_000],
+                         audio_codecs=["aac"])
+        # (2_000_000 + 200_000) bps * 100s / 8
+        self.assertEqual(encode.predicted_size(info, self.cfg, 2_000_000),
+                         27_500_000)
+
+    def test_lossless_track_counted_at_its_opus_bitrate(self):
+        info = make_info(duration=100.0, audio_codecs=["truehd"],
+                         audio_bitrates=[4_000_000], audio_channels=[6])
+        # 6 声道 Opus = 480k，不是原来的 4 Mbps
+        self.assertEqual(encode.predicted_size(info, self.cfg, 1_000_000),
+                         int((1_000_000 + 480_000) * 100 / 8))
+
+    def test_unknown_audio_bitrate_gives_up(self):
+        info = make_info(duration=100.0, audio_codecs=["aac"],
+                         audio_bitrates=[0])
+        self.assertIsNone(encode.predicted_size(info, self.cfg, 2_000_000))
+
+    def test_unknown_duration_or_bitrate_gives_up(self):
+        self.assertIsNone(encode.predicted_size(make_info(duration=0.0),
+                                                self.cfg, 2_000_000))
+        self.assertIsNone(encode.predicted_size(make_info(), self.cfg, 0))
+
+    def test_no_audio_is_fine(self):
+        info = make_info(duration=100.0, audio_codecs=[], audio_bitrates=[],
+                         audio_channels=[])
+        self.assertEqual(encode.predicted_size(info, self.cfg, 800_000),
+                         10_000_000)
+
+
+class AudioPlanTests(unittest.TestCase):
+    """预估和实际编码参数必须出自同一套决定。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def test_plan_matches_args_for_mixed_tracks(self):
+        info = make_info(audio_codecs=["aac", "flac", "dts"],
+                         audio_bitrates=[192_000, 3_000_000, 768_000],
+                         audio_channels=[2, 2, 6])
+        plan = encode.audio_plan(info, self.cfg)
+        self.assertEqual([kind for kind, _br in plan],
+                         ["copy", "opus", "opus"])
+        args = encode.audio_args(info, self.cfg)
+        self.assertIn("-c:a:0", args)
+        self.assertEqual(args[args.index("-c:a:0") + 1], "copy")
+        self.assertEqual(args[args.index("-b:a:1") + 1], "160k")
+        self.assertEqual(args[args.index("-b:a:2") + 1], "480k")
+
+
+class SampleBitrateTests(unittest.TestCase):
+    def test_bytes_over_total_sample_seconds(self):
+        self.assertEqual(encode._sample_bitrate(1_000_000, 10.0, 4), 200_000)
+
+    def test_degenerate_inputs(self):
+        self.assertEqual(encode._sample_bitrate(0, 10.0, 4), 0)
+        self.assertEqual(encode._sample_bitrate(1000, 0.0, 4), 0)
+        self.assertEqual(encode._sample_bitrate(1000, 10.0, 0), 0)
 
 
 class AdaptiveFallbackTests(unittest.TestCase):

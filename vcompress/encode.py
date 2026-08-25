@@ -218,21 +218,55 @@ def opus_layout_args(index: int, channels: int) -> list:
     return [f"-mapping_family:a:{index}", "255"]
 
 
-def audio_args(info, cfg) -> list:
-    """逐条音轨决定 copy 还是转 Opus，不因为一条无损轨就重压所有音轨。"""
-    if not info.audio_codecs:
-        return []
+def audio_plan(info, cfg) -> list:
+    """逐条音轨的处置决定：("copy"|"opus", 码率 bps)，码率 0 表示不知道。
+
+    单独抽出来是为了让「产物会有多大」这个预估和实际编码参数用同一套决定，
+    不会两边各写一份判断然后慢慢走偏。
+    """
     threshold = int(cfg["audio"].get("transcode_over_kbps", 512)) * 1000
     base_kbps = int(cfg["audio"].get("opus_kbps", 160))
-    args = []
-    transcoding = False
+    plan = []
     for i, codec in enumerate(info.audio_codecs):
         codec = (codec or "").lower()
         br = info.audio_bitrates[i] if i < len(info.audio_bitrates) else 0
         ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
         if codec.startswith(LOSSLESS_AUDIO) or (br and br > threshold):
+            plan.append(("opus", opus_bitrate(base_kbps, ch) * 1000))
+        else:
+            plan.append(("copy", br))
+    return plan
+
+
+def predicted_size(info, cfg, video_bitrate: int):
+    """按样本实测的视频码率预估产物体积；信息不全时返回 None。
+
+    比 [skip].expected_ratio 那张按编码器写死的粗估准得多：那是"h264 大概能
+    压到 55%"，这是"这个片源在选定 CRF 下实测每秒多少字节"。字幕/章节/附件
+    的开销忽略不计，所以估出来偏小——宁可偏乐观，也不要把本来能省下来的文件
+    误判成不值得压。
+    """
+    if video_bitrate <= 0 or info.duration <= 0:
+        return None
+    total = video_bitrate
+    for _kind, br in audio_plan(info, cfg):
+        if br <= 0:
+            return None  # 有音轨码率不明，整个预估就不可信，宁可不猜
+        total += br
+    return int(total * info.duration / 8)
+
+
+def audio_args(info, cfg) -> list:
+    """逐条音轨决定 copy 还是转 Opus，不因为一条无损轨就重压所有音轨。"""
+    if not info.audio_codecs:
+        return []
+    args = []
+    transcoding = False
+    for i, (kind, bitrate) in enumerate(audio_plan(info, cfg)):
+        if kind == "opus":
+            ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
             args += [f"-c:a:{i}", "libopus",
-                     f"-b:a:{i}", f"{opus_bitrate(base_kbps, ch)}k"]
+                     f"-b:a:{i}", f"{bitrate // 1000}k"]
             args += opus_layout_args(i, ch)
             transcoding = True
         else:
@@ -659,33 +693,52 @@ def sample_starts(duration: float, seconds: float, count: int) -> list:
     return unique
 
 
+@dataclass(frozen=True)
+class CrfChoice:
+    """自适应搜索的结论。
+
+    除了选中的 CRF，还带上样本实测的视频码率和是否真的达到了目标画质——这两个
+    信息能在编码开始前就判断「这文件值不值得压几个小时」。
+    """
+
+    crf: int
+    video_bitrate: int = 0
+    meets_target: bool = True
+    worst_vmaf: float = 0.0
+
+
 def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
-               target: float, model: str, log) -> float:
-    """在所有样本段上试这个 CRF，返回最差段的分数。
+               target: float, model: str, log) -> tuple:
+    """在所有样本段上试这个 CRF，返回 (最差段分数, 样本码率 bps)。
 
     取最差而不是平均：平均分能被好段抬起来，而观感是由最差处决定的。某段已经
     不达标时后面的段就不用再量了，直接判这个 CRF 不行。
     """
     worst = None
+    total_bytes = 0
+    measured = 0
     for i, ref in enumerate(refs):
         sample = root / f"s{crf}_{i}.mkv"
         try:
             encode_sample(tools.ffmpeg, ref, crf, enc_cfg, sample)
+            size = sample.stat().st_size
             score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
         finally:
             sample.unlink(missing_ok=True)
+        total_bytes += size
+        measured += 1
         log.debug(f"adaptive probe: crf={crf} segment {i + 1}/{len(refs)} "
-                  f"vmaf={score:.2f}")
+                  f"vmaf={score:.2f} {size} bytes")
         worst = score if worst is None else min(worst, score)
         if worst < target:
             break
-    return worst if worst is not None else 0.0
+    return (worst if worst is not None else 0.0), total_bytes, measured
 
 
 def pick_crf_adaptive(tools, src: Path, duration: float,
                       enc_cfg: dict, ad_cfg: dict, log,
                       lossless_codec: str = "libx264",
-                      model: str = "") -> int | None:
+                      model: str = "") -> "CrfChoice | None":
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
     lo = int(ad_cfg.get("crf_min", 16))
     hi = int(ad_cfg.get("crf_max", 44))
@@ -694,6 +747,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
     count = max(1, to_int(ad_cfg.get("sample_count"), 4))
 
     starts = sample_starts(duration, seconds, count)
+    span = min(seconds, duration) if duration > 0 else seconds
     best = None
     log.info(f"adaptive search: extracting {len(starts)} reference segment(s) "
              f"of {seconds:.0f}s from {src.name}")
@@ -703,35 +757,46 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
         refs = []
         for i, start in enumerate(starts):
             ref = root / f"ref{i}.mkv"
-            extract_segment(tools.ffmpeg, src, start, min(seconds, duration),
-                            ref, lossless_codec)
+            extract_segment(tools.ffmpeg, src, start, span, ref,
+                            lossless_codec)
             refs.append(ref)
 
         while hi - lo > step:
             mid = (lo + hi) // 2
-            score = _probe_crf(tools, refs, mid, enc_cfg, root, target,
-                               model, log)
+            score, sample_bytes, measured = _probe_crf(
+                tools, refs, mid, enc_cfg, root, target, model, log)
             log.info(f"adaptive probe: crf={mid} worst-segment vmaf="
                      f"{score:.2f} (target {target})")
             if score >= target:
-                best = mid
+                best = CrfChoice(mid, _sample_bitrate(sample_bytes, span,
+                                                      measured), True, score)
                 lo = mid
             else:
                 hi = mid
         if best is None:
-            score = _probe_crf(tools, refs, lo, enc_cfg, root, target,
-                               model, log)
+            score, sample_bytes, measured = _probe_crf(
+                tools, refs, lo, enc_cfg, root, target, model, log)
             if score < target:
                 log.warning(
                     f"even crf={lo} only reaches vmaf={score:.2f} "
-                    f"< {target}; using crf={lo}"
+                    f"< {target}"
                 )
-            best = lo
-        log.info(f"adaptive crf selected: {best} (target vmaf {target}, "
-                 f"worst of {len(refs)} segment(s))")
+            best = CrfChoice(lo, _sample_bitrate(sample_bytes, span, measured),
+                             score >= target, score)
+        log.info(f"adaptive crf selected: {best.crf} (target vmaf {target}, "
+                 f"worst of {len(refs)} segment(s) {best.worst_vmaf:.2f}, "
+                 f"sampled {best.video_bitrate // 1000} kbps)")
         return best
     except (EncodeError, OSError) as e:
         log.warning(f"adaptive crf search failed ({e}); falling back to default")
         return None
     finally:
         tmpdir.cleanup()
+
+
+def _sample_bitrate(total_bytes: int, span: float, segments: int) -> int:
+    """样本总字节换算成码率。样本是均匀铺开抽的，可以代表全片平均。"""
+    seconds = span * segments
+    if seconds <= 0 or total_bytes <= 0:
+        return 0
+    return int(total_bytes * 8 / seconds)

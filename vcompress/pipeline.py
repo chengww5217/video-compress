@@ -83,6 +83,10 @@ class RunContext:
         return self.adaptive and bool(self.cfg["adaptive"].get("enabled", True))
 
 
+class SkipFile(Exception):
+    """编码开始前就断定不该压：按跳过记账，不算失败。"""
+
+
 def process_file(ctx: RunContext, src: Path) -> str:
     try:
         info = probe.probe(ctx.tools, src)
@@ -127,6 +131,13 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
 
         saved = _commit(ctx, src, tmp, target, info, crf, elapsed)
         return ctx.stats.record(OK, saved)
+    except SkipFile as skipped:
+        # 搜索阶段就看出不值得压：删掉可能留下的半成品，按跳过记账
+        printer.close()
+        files.remove_tmp(tmp)
+        log.info(f"[skip] {src.name}: {skipped}")
+        ctx.store.add("skipped", info, reason=str(skipped))
+        return ctx.stats.record(SKIPPED)
     except BaseException as exc:  # noqa: BLE001 - 中断也要走清理
         printer.close()
         return _handle_failure(ctx, src, info, tmp, exc)
@@ -148,7 +159,8 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
             ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
         )
         if picked is not None:
-            crf = picked
+            crf = picked.crf
+            _reject_unworthy(ctx, info, picked)
 
     cmd = encode.build_cmd(
         ctx.tools.ffmpeg, src, tmp, enc_cfg, crf,
@@ -165,6 +177,35 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     elapsed = time.monotonic() - t0
     printer(100.0)
     return crf, elapsed
+
+
+def _reject_unworthy(ctx: RunContext, info, picked) -> None:
+    """搜索结果已经能回答两个问题，别等几小时后才知道答案。
+
+    1. 这个片源根本达不到目标画质吗？达不到就不该压——「视觉无损优先」的前提下，
+       压出一个低于 target_vmaf 的产物没有意义；
+    2. 按样本实测码率，压完能省多少？省得不够就不压。这比 expected_ratio 那张
+       按编码器写死的粗估准得多，而且是在动手编码之前。
+    """
+    if not picked.meets_target and ctx.cfg["adaptive"].get("require_target", True):
+        raise SkipFile(
+            f"even crf={picked.crf} only reaches vmaf {picked.worst_vmaf:.2f}, "
+            f"below target {ctx.cfg['adaptive']['target_vmaf']}; "
+            f"not worth compressing"
+        )
+    predicted = encode.predicted_size(info, ctx.cfg, picked.video_bitrate)
+    if predicted is None or info.size <= 0:
+        return
+    saving = 1.0 - predicted / info.size
+    floor = float(ctx.cfg["skip"].get("min_saving_ratio", 0.15))
+    log.info(f"[predict] {info.path.name}: crf={picked.crf} sampled "
+             f"{picked.video_bitrate // 1000} kbps -> ~{fmt_size(predicted)} "
+             f"({saving:.1%} saving)")
+    if saving < floor:
+        raise SkipFile(
+            f"sampled crf={picked.crf} predicts {fmt_size(predicted)} "
+            f"({saving:.1%} saving), below required {floor:.0%}"
+        )
 
 
 def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,

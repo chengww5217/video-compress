@@ -55,6 +55,7 @@ DEFAULTS = {
         "sample_seconds": 10,
         "sample_count": 4,
         "search_step": 2,
+        "require_target": True,
     },
     "audio": {
         "transcode_over_kbps": 512,
