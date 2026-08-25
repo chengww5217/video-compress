@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -512,9 +512,9 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertTrue(src.exists(), "original must survive a failed verify")
-        self.assertTrue((self.root / "keepfail.failed.mkv").exists(),
+        self.assertTrue((self.root / "keepfail.mp4.failed.mkv").exists(),
                         "the rejected encode should be kept when configured")
-        self.assertFalse((self.root / "keepfail.tmp.mkv").exists())
+        self.assertFalse((self.root / "keepfail.mp4.tmp.mkv").exists())
 
     def test_m_missing_encoder_fails_before_touching_anything(self):
         cfg = self.root / "badcodec.toml"
@@ -596,6 +596,165 @@ class IntegrationTests(unittest.TestCase):
         for n in names:
             self.assertTrue((self.root / n).exists(),
                             "originals must survive an interrupt")
+
+    def test_p_sigint_in_serial_mode_also_cleans_up(self):
+        """串行模式走的是另一条路径：KeyboardInterrupt 直接穿透 worker。
+        以前只测了 --workers 2，串行下临时文件其实会留下来。"""
+        cfg = self.root / "slow-serial.toml"
+        cfg.write_text(
+            (self.root / "config.toml").read_text(encoding="utf-8")
+            .replace('preset = "8"', 'preset = "2"')
+            .replace(f"{self.root.as_posix()}/results.jsonl",
+                     f"{self.root.as_posix()}/serial-results.jsonl"),
+            encoding="utf-8",
+        )
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = self.root / "serial.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             "testsrc2=duration=20:size=640x360:rate=30",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+             "-pix_fmt", "yuv420p", str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+
+        proc = subprocess.Popen(
+            [sys.executable, "-m", "vcompress", str(src),
+             "--config", str(cfg), "--no-adaptive"],
+            cwd=str(helpers.ROOT), stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT, text=True, encoding="utf-8",
+            errors="replace",
+        )
+        try:
+            time.sleep(8)
+            self.assertIsNone(proc.poll(), "encode finished before SIGINT")
+            proc.send_signal(signal.SIGINT)
+            try:
+                out = proc.communicate(timeout=60)[0]
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.communicate()
+                self.fail("SIGINT did not stop the serial run")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.communicate()
+
+        self.assertEqual(proc.returncode, 130, out)
+        self.assertEqual(list(self.root.glob("serial*.tmp.mkv")), [],
+                         "a serial interrupt must remove its own temp file")
+        self.assertTrue(src.exists(), "original must survive an interrupt")
+        self.assertFalse((self.root / "serial.mkv").exists())
+
+    def test_q_same_stem_sources_do_not_collide_in_parallel(self):
+        """同 stem 不同容器的两个源以前共用一个 a.tmp.mkv：一个报文件不存在，
+        另一个可能把对方的产物当成自己的校验通过——静默的数据损坏。"""
+        box = Path(tempfile.mkdtemp(prefix="vc_collide_", dir=self.root))
+        cfg = box / "config.toml"
+        cfg.write_text(INTEGRATION_CONFIG.replace("{root}", box.as_posix()),
+                       encoding="utf-8")
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        # 两个源内容不同，才能看出产物有没有串味
+        for name, pattern in (("a.mp4", "testsrc2"), ("a.mkv", "smptebars")):
+            subprocess.run(
+                [ff, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i",
+                 f"{pattern}=duration=4:size=320x180:rate=15",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "14",
+                 "-pix_fmt", "yuv420p", str(box / name)],
+                check=True, capture_output=True, timeout=180,
+            )
+
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(box / "a.mp4"),
+             str(box / "a.mkv"), "--config", str(cfg), "--no-adaptive",
+             "--workers", "2"],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(list(box.glob("*.tmp.mkv")), [], r.stdout)
+        outputs = sorted(p.name for p in box.glob("a*.mkv"))
+        self.assertEqual(outputs, ["a.av1.mkv", "a.mkv"], r.stdout)
+        # 两个产物来自不同的源，体积不该恰好一致
+        self.assertNotEqual((box / "a.mkv").stat().st_size,
+                            (box / "a.av1.mkv").stat().st_size,
+                            "both outputs look identical: temp files collided")
+        self.assertFalse((box / "a.mp4").exists(), r.stdout)
+
+
+    def test_r_unsupported_pixel_format_is_normalised(self):
+        """libsvtav1 只吃 4:2:0；不归一化的话 4:2:2 源会直接编码失败。"""
+        box = Path(tempfile.mkdtemp(prefix="vc_422_", dir=self.root))
+        cfg = box / "config.toml"
+        cfg.write_text(INTEGRATION_CONFIG.replace("{root}", box.as_posix()),
+                       encoding="utf-8")
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = box / "chroma422.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=3:size=320x180:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+             "-pix_fmt", "yuv422p", str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        self.assertEqual(self.pix_fmt(src), "yuv422p", "fixture is not 4:2:2")
+
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(src), "--config", str(cfg),
+             "--no-adaptive"],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+        out = box / "chroma422.mkv"
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertTrue(out.exists(), r.stdout)
+        self.assertEqual(self.pix_fmt(out), "yuv420p", r.stdout)
+        self.assertIn("does not accept yuv422p", r.stdout)
+
+    def test_s_original_comment_is_kept_alongside_the_marker(self):
+        box = Path(tempfile.mkdtemp(prefix="vc_comment_", dir=self.root))
+        cfg = box / "config.toml"
+        cfg.write_text(INTEGRATION_CONFIG.replace("{root}", box.as_posix()),
+                       encoding="utf-8")
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        src = box / "noted.mp4"
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=3:size=320x180:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+             "-pix_fmt", "yuv420p", "-metadata", "comment=ripped by hand",
+             str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(src), "--config", str(cfg),
+             "--no-adaptive"],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=600,
+        )
+        self.assertEqual(r.returncode, 0, r.stdout)
+        comment = self.comment(box / "noted.mkv")
+        self.assertIn("ripped by hand", comment,
+                      "the user's own comment must not be destroyed")
+        self.assertIn("vcompress-v1", comment)
+
+    def pix_fmt(self, path):
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffprobe
+        r = subprocess.run(
+            [ff, "-v", "error", "-select_streams", "v:0", "-show_entries",
+             "stream=pix_fmt", "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60, check=True)
+        return r.stdout.strip()
+
+    def comment(self, path):
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffprobe
+        r = subprocess.run(
+            [ff, "-v", "error", "-show_entries", "format_tags=comment",
+             "-of", "csv=p=0", str(path)],
+            capture_output=True, text=True, timeout=60, check=True)
+        return r.stdout.strip()
 
 
 if __name__ == "__main__":

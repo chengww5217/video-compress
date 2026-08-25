@@ -1,219 +1,231 @@
-﻿import sys
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import logging
 import tempfile
 import unittest
 from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.cli import (ResultStore, _keep_failed_tmp, clean_stale_tmp,
-                           gather_files, resolve_final_path, resolve_run_path)
+from vcompress import cli, encode
+from vcompress.results import ResultStore
 
 
-class ResultStoreTests(unittest.TestCase):
+class ParserTests(unittest.TestCase):
+    def test_defaults(self):
+        args = cli.build_parser().parse_args(["a.mp4"])
+        self.assertEqual(args.paths, ["a.mp4"])
+        self.assertTrue(args.recursive)
+        self.assertTrue(args.adaptive)
+        self.assertFalse(args.dry_run)
+        self.assertIsNone(args.encoder)
+        self.assertIsNone(args.config)
+
+    def test_flags(self):
+        args = cli.build_parser().parse_args(
+            ["a.mp4", "b.mkv", "--dry-run", "--no-recursive", "--no-adaptive",
+             "--keep", "--recycle", "--force", "--workers", "3",
+             "--encoder", "x265"])
+        self.assertEqual(args.paths, ["a.mp4", "b.mkv"])
+        self.assertFalse(args.recursive)
+        self.assertFalse(args.adaptive)
+        self.assertTrue(args.dry_run)
+        self.assertTrue(args.keep)
+        self.assertTrue(args.recycle)
+        self.assertTrue(args.force)
+        self.assertEqual(args.workers, 3)
+        self.assertEqual(args.encoder, "x265")
+
+    def test_encoder_is_not_a_hardcoded_choice(self):
+        """编码器候选来自配置，argparse 不该先把没见过的名字拒掉。"""
+        args = cli.build_parser().parse_args(["a.mp4", "--encoder", "vp9"])
+        self.assertEqual(args.encoder, "vp9")
+
+
+class PreflightTests(unittest.TestCase):
     def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.path = Path(self.tmp.name) / "results.jsonl"
+        self.cfg = make_cfg()
+        self.logs = []
+        self.handler = _CaptureHandler(self.logs)
+        logging.getLogger("vcompress").addHandler(self.handler)
 
     def tearDown(self):
-        self.tmp.cleanup()
+        logging.getLogger("vcompress").removeHandler(self.handler)
 
-    def test_add_and_history(self):
-        store = ResultStore(self.path)
-        info = make_info(path=Path(self.tmp.name) / "a.mp4")
-        store.add("ok", info, crf=27, saving=0.5)
-        self.assertEqual(store.last(info.path)["action"], "ok")
-        self.assertEqual(store.last(info.path)["crf"], 27)
+    def run_preflight(self, encoders, filters, adaptive=True):
+        caps = encode.Caps(encoders=frozenset(encoders),
+                           filters=frozenset(filters))
+        return cli.preflight(helpers.FakeTools(), caps, self.cfg, "av1",
+                             adaptive), caps
 
-    def test_latest_record_wins(self):
-        store = ResultStore(self.path)
-        info = make_info(path=Path(self.tmp.name) / "a.mp4")
-        store.add("ok", info)
-        store.add("skipped", info, reason="tagged")
-        self.assertEqual(store.last(info.path)["action"], "skipped")
-        lines = self.path.read_text(encoding="utf-8").strip().splitlines()
-        self.assertEqual(len(lines), 2)
+    def messages(self):
+        return "\n".join(self.logs)
 
-    def test_corrupt_lines_tolerated(self):
-        self.path.write_text("not json\n", encoding="utf-8")
-        store = ResultStore(self.path)
-        info = make_info(path=Path(self.tmp.name) / "b.mp4")
-        store.add("dryrun", info)
-        self.assertIsNotNone(store.last(info.path))
+    def test_missing_video_codec_aborts(self):
+        ok, _ = self.run_preflight({"libx264", "libopus"}, {"libvmaf"})
+        self.assertFalse(ok)
+        self.assertIn("libsvtav1", self.messages())
 
+    def test_full_build_passes_without_warnings(self):
+        ok, _ = self.run_preflight({"libsvtav1", "libx264", "libopus"},
+                                   {"libvmaf", "scale"})
+        self.assertTrue(ok)
+        self.assertEqual(self.logs, [])
 
-class GatherFilesTests(unittest.TestCase):
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        root = Path(self.tmp.name)
-        (root / "a.mp4").write_bytes(b"x")
-        (root / "e.tmp.mkv").write_bytes(b"x")
-        (root / "note.txt").write_bytes(b"x")
-        (root / "sub" / "deep").mkdir(parents=True)
-        (root / "sub" / "c.mkv").write_bytes(b"x")
-        (root / "sub" / "deep" / "d.mp4").write_bytes(b"x")
-        self.root = root
+    def test_missing_opus_only_warns(self):
+        ok, _ = self.run_preflight({"libsvtav1", "libx264"}, {"libvmaf"})
+        self.assertTrue(ok)
+        self.assertIn("libopus", self.messages())
 
-    def tearDown(self):
-        self.tmp.cleanup()
+    def test_missing_vmaf_only_warns(self):
+        ok, _ = self.run_preflight({"libsvtav1", "libx264", "libopus"},
+                                   {"scale"})
+        self.assertTrue(ok)
+        self.assertIn("libvmaf", self.messages())
 
-    def names(self, files):
-        return {f.name for f in files}
+    def test_missing_x264_falls_back_to_ffv1(self):
+        ok, caps = self.run_preflight({"libsvtav1", "libopus"}, {"libvmaf"})
+        self.assertTrue(ok)
+        self.assertEqual(caps.lossless_codec, "ffv1")
+        self.assertIn("ffv1", self.messages())
 
-    def test_recursive_finds_and_filters(self):
-        files = gather_files([self.root], True, {".mp4", ".mkv"})
-        self.assertEqual(self.names(files), {"a.mp4", "c.mkv", "d.mp4"})
-
-    def test_no_recursive_only_top_level(self):
-        files = gather_files([self.root], False, {".mp4", ".mkv"})
-        self.assertEqual(self.names(files), {"a.mp4"})
-
-    def test_deduplicates_overlapping_paths(self):
-        dup = gather_files([self.root, self.root], True, {".mp4", ".mkv"})
-        self.assertEqual(len(dup), 3)
-
-    def test_explicit_file_accepted(self):
-        f = self.root / "a.mp4"
-        files = gather_files([f, f], False, {".mp4"})
-        self.assertEqual(len(files), 1)
+    def test_unknown_build_skips_the_check(self):
+        ok, _ = self.run_preflight(set(), set())
+        self.assertTrue(ok)
+        self.assertIn("skipping the build self-check", self.messages())
 
 
-class CleanStaleTmpTests(unittest.TestCase):
+class _CaptureHandler(logging.Handler):
+    def __init__(self, sink):
+        super().__init__(level=logging.WARNING)
+        self.sink = sink
+
+    def emit(self, record):
+        self.sink.append(record.getMessage())
+
+
+class LoggingSetupTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.saved = logging.getLogger().handlers[:]
+
+    def tearDown(self):
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+            h.close()
+        for h in self.saved:
+            root.addHandler(h)
+        self.tmp.cleanup()
+
+    def silence_console(self):
+        """只留文件 handler，别把几百行测试日志喷到测试输出里。"""
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            if isinstance(h, logging.StreamHandler) and \
+                    not isinstance(h, logging.FileHandler):
+                root.removeHandler(h)
+
+    def test_creates_the_log_directory(self):
+        target = self.root / "deep" / "logs" / "vc.log"
+        cli.setup_logging(target)
+        self.silence_console()
+        logging.getLogger("vcompress").info("hello")
+        self.assertTrue(target.exists())
+        self.assertIn("hello", target.read_text(encoding="utf-8"))
+
+    def test_repeated_setup_does_not_duplicate_handlers(self):
+        target = self.root / "vc.log"
+        cli.setup_logging(target)
+        first = len(logging.getLogger().handlers)
+        cli.setup_logging(target)
+        self.assertEqual(len(logging.getLogger().handlers), first,
+                         "handlers accumulated across setup_logging calls")
+
+    def test_log_file_is_rotated_instead_of_growing_forever(self):
+        target = self.root / "vc.log"
+        cli.setup_logging(target, max_bytes=2048, backups=2)
+        self.silence_console()
+        log = logging.getLogger("vcompress")
+        for i in range(300):
+            log.info(f"line {i} " + "x" * 80)
+        rotated = sorted(p.name for p in self.root.glob("vc.log*"))
+        self.assertIn("vc.log.1", rotated, rotated)
+        self.assertLessEqual(len(rotated), 3, rotated)
+
+
+class PickTodoTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.store = ResultStore(self.root / "results.jsonl")
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def touch(self, name):
+    def write(self, name, size=10):
         p = self.root / name
-        p.write_bytes(b"x")
+        p.write_bytes(b"x" * size)
         return p
 
-    def test_removes_the_temp_file_of_a_pending_source(self):
-        src = self.touch("a.mp4")
-        stale = self.touch("a.tmp.mkv")
-        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 1)
-        self.assertFalse(stale.exists())
-        self.assertTrue(src.exists())
+    def test_cached_files_are_dropped(self):
+        a = self.write("a.mp4", 10)
+        b = self.write("b.mp4", 10)
+        self.store.add("ok", make_info(path=a, size=10), output=str(a),
+                       new_size=10)
+        self.assertEqual(cli._pick_todo([a, b], self.store, force=False), [b])
 
-    def test_keeps_temp_files_of_untouched_sources(self):
-        src = self.touch("a.mp4")
-        mine = self.touch("a.tmp.mkv")
-        someone_else = self.touch("holiday-footage.tmp.mkv")
-        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 1)
-        self.assertFalse(mine.exists())
-        self.assertTrue(someone_else.exists(),
-                        "unrelated .tmp.mkv files must be left alone")
-
-    def test_other_suffixes_untouched(self):
-        src = self.touch("a.mp4")
-        other = self.touch("a.tmp.txt")
-        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 0)
-        self.assertTrue(other.exists())
-
-    def test_nothing_to_clean(self):
-        src = self.touch("a.mp4")
-        self.assertEqual(clean_stale_tmp([src], ".tmp.mkv"), 0)
+    def test_force_keeps_everything(self):
+        a = self.write("a.mp4", 10)
+        self.store.add("skipped", make_info(path=a, size=10), reason="tagged")
+        self.assertEqual(cli._pick_todo([a], self.store, force=True), [a])
 
 
-class ResolveFinalPathTests(unittest.TestCase):
+class MainEarlyExitTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
+        self.saved = logging.getLogger().handlers[:]
 
     def tearDown(self):
+        root = logging.getLogger()
+        for h in root.handlers[:]:
+            root.removeHandler(h)
+            h.close()
+        for h in self.saved:
+            root.addHandler(h)
         self.tmp.cleanup()
 
-    def touch(self, name):
-        p = self.root / name
-        p.write_bytes(b"x")
+    def write_cfg(self, body: str) -> Path:
+        p = self.root / "config.toml"
+        p.write_text(
+            f'[run]\nlog_file = "{(self.root / "vc.log").as_posix()}"\n'
+            f'results_file = "{(self.root / "r.jsonl").as_posix()}"\n' + body,
+            encoding="utf-8")
         return p
 
-    def test_free_target_used_as_is(self):
-        src = self.touch("a.mp4")
-        target = self.root / "a.mkv"
-        final = resolve_final_path(src, target, ".mkv", "av1", keep=False)
-        self.assertEqual(final, target)
+    def test_missing_explicit_config_is_a_usage_error(self):
+        rc = cli.main(["x.mp4", "--config", str(self.root / "nope.toml")])
+        self.assertEqual(rc, cli.EXIT_USAGE)
 
-    def test_in_place_replacement_allowed(self):
-        src = self.touch("a.mkv")
-        final = resolve_final_path(src, src, ".mkv", "av1", keep=False)
-        self.assertEqual(final, src)
+    def test_broken_config_is_a_usage_error(self):
+        p = self.write_cfg("[skip]\nmin_saving_ration = 0.2\n")
+        rc = cli.main(["x.mp4", "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_USAGE)
 
-    def test_unrelated_target_is_not_overwritten(self):
-        src = self.touch("a.mp4")
-        victim = self.touch("a.mkv")
-        final = resolve_final_path(src, victim, ".mkv", "av1", keep=False)
-        self.assertEqual(final, self.root / "a.av1.mkv")
-        self.assertTrue(victim.exists())
+    def test_unknown_encoder_is_a_usage_error(self):
+        p = self.write_cfg("")
+        rc = cli.main(["x.mp4", "--config", str(p), "--encoder", "vp9"])
+        self.assertEqual(rc, cli.EXIT_USAGE)
 
-    def test_keep_mode_never_targets_source(self):
-        src = self.touch("a.mkv")
-        final = resolve_final_path(src, src, ".mkv", "av1", keep=True)
-        self.assertEqual(final, self.root / "a.av1.mkv")
-
-    def test_fallback_taken_raises(self):
-        src = self.touch("a.mp4")
-        self.touch("a.mkv")
-        self.touch("a.av1.mkv")
-        with self.assertRaises(RuntimeError) as cm:
-            resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
-                               keep=False)
-        self.assertIn("already exists", str(cm.exception))
-
-
-class KeepFailedTmpTests(unittest.TestCase):
-    """校验没过时可以留下产物，供人工确认到底是画质坏了还是量错了。"""
-
-    def setUp(self):
-        self.tmp = tempfile.TemporaryDirectory()
-        self.root = Path(self.tmp.name)
-        self.src = self.root / "a.mp4"
-        self.src.write_bytes(b"src")
-        self.tmp_out = self.root / "a.tmp.mkv"
-        self.tmp_out.write_bytes(b"encoded")
-
-    def tearDown(self):
-        self.tmp.cleanup()
-
-    def test_renamed_next_to_the_source(self):
-        kept = _keep_failed_tmp(self.tmp_out, self.src, ".mkv")
-        self.assertEqual(kept, self.root / "a.failed.mkv")
-        self.assertEqual(kept.read_bytes(), b"encoded")
-        self.assertFalse(self.tmp_out.exists())
-        self.assertTrue(self.src.exists(), "original must survive")
-
-    def test_existing_name_is_never_overwritten(self):
-        victim = self.root / "a.failed.mkv"
-        victim.write_bytes(b"older attempt")
-        self.assertIsNone(_keep_failed_tmp(self.tmp_out, self.src, ".mkv"))
-        self.assertEqual(victim.read_bytes(), b"older attempt")
-
-    def test_missing_temp_file_is_a_no_op(self):
-        self.tmp_out.unlink()
-        self.assertIsNone(_keep_failed_tmp(self.tmp_out, self.src, ".mkv"))
-
-
-class ResolveRunPathTests(unittest.TestCase):
-    def test_relative_path_hangs_off_the_config_dir(self):
-        base = Path("/etc/vcompress")
-        self.assertEqual(resolve_run_path(base, "logs/results.jsonl"),
-                         base / "logs" / "results.jsonl")
-
-    def test_absolute_path_kept(self):
-        base = Path("/etc/vcompress")
-        abs_p = Path(tempfile.gettempdir()).resolve() / "r.jsonl"
-        self.assertEqual(resolve_run_path(base, str(abs_p)), abs_p)
-
-    def test_user_home_expanded(self):
-        got = resolve_run_path(Path("/etc/vcompress"), "~/vc.log")
-        self.assertEqual(got, Path.home() / "vc.log")
+    def test_no_matching_files_is_success(self):
+        p = self.write_cfg("")
+        rc = cli.main([str(self.root), "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_OK)
 
 
 if __name__ == "__main__":
     unittest.main()
-

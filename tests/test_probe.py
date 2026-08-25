@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -6,7 +6,8 @@ import unittest
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.probe import (_parse_fps, _stream_bitrate, _to_int, should_skip)
+from vcompress.probe import _parse_fps, _stream_bitrate, should_skip
+from vcompress.util import to_int as _to_int
 
 
 class ParseHelperTests(unittest.TestCase):

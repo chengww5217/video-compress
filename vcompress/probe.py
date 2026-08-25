@@ -1,8 +1,13 @@
+"""ffprobe 探测与「这个文件要不要压」的判定。"""
+
 import json
 import shutil
-import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from . import proc
+from .util import to_float, to_int
 
 CODEC_FAMILY = {
     "h264": "h264",
@@ -21,10 +26,15 @@ CODEC_FAMILY = {
     "wmv3": "wmv3",
 }
 
+if sys.platform == "win32":
+    _FALLBACK_DIRS = (r"C:\Program Files\ffmpeg\bin", r"C:\Program Files\ffmpeg")
+else:
+    _FALLBACK_DIRS = ("/opt/homebrew/bin", "/usr/local/bin", "/usr/bin")
+
 
 def _find_tool(config_value: str, name: str) -> str:
     def resolve(v):
-        p = Path(v)
+        p = Path(v).expanduser()
         if p.is_dir():
             for cand in (p / f"{name}.exe", p / name):
                 if cand.exists():
@@ -38,10 +48,14 @@ def _find_tool(config_value: str, name: str) -> str:
         r = resolve(config_value)
         if r:
             return r
+        raise FileNotFoundError(
+            f"config.toml [tools] points at {config_value!r}, but no {name} "
+            f"was found there"
+        )
     w = shutil.which(name)
     if w:
         return w
-    for d in (r"C:\Program Files\ffmpeg\bin", r"C:\Program Files\ffmpeg"):
+    for d in _FALLBACK_DIRS:
         r = resolve(d)
         if r:
             return r
@@ -87,13 +101,6 @@ class VideoInfo:
         return 0
 
 
-def _to_int(v, default=0):
-    try:
-        return int(float(v))
-    except (TypeError, ValueError):
-        return default
-
-
 def _parse_fps(rate: str) -> float:
     try:
         num, den = rate.split("/")
@@ -110,7 +117,7 @@ def _stream_bitrate(stream: dict) -> int:
     tags = {k.lower(): v for k, v in (stream.get("tags") or {}).items()}
     bps = next((v for k, v in tags.items() if k == "bps" or k.startswith("bps-")),
                None)
-    return _to_int(stream.get("bit_rate")) or _to_int(bps)
+    return to_int(stream.get("bit_rate")) or to_int(bps)
 
 
 def probe(tools: Tools, path: Path) -> VideoInfo:
@@ -122,10 +129,15 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
         "-of", "json",
         str(path),
     ]
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
-    if r.returncode != 0:
-        raise RuntimeError(f"ffprobe failed for {path.name}: {r.stderr.strip()[:300]}")
-    data = json.loads(r.stdout)
+    # 走 run_managed：Ctrl+C 时这个 ffprobe 也要被杀掉，别留孤儿进程
+    rc, out, err = proc.run_managed(cmd)
+    if rc != 0:
+        raise RuntimeError(f"ffprobe failed for {path.name}: {err.strip()[:300]}")
+    try:
+        data = json.loads(out)
+    except ValueError as e:
+        raise RuntimeError(f"ffprobe returned unparsable JSON for "
+                           f"{path.name}: {e}") from e
     fmt = data.get("format", {})
     streams = data.get("streams", [])
     vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
@@ -135,21 +147,30 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info = VideoInfo(path=path, container=path.suffix.lower())
     info.video_codec = vstream.get("codec_name", "")
     info.codec_family = CODEC_FAMILY.get(info.video_codec, "")
-    info.width = _to_int(vstream.get("width"))
-    info.height = _to_int(vstream.get("height"))
-    info.fps = _parse_fps(vstream.get("r_frame_rate")) or _parse_fps(vstream.get("avg_frame_rate"))
+    info.width = to_int(vstream.get("width"))
+    info.height = to_int(vstream.get("height"))
+    info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
+        _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")
     info.bitrate = _stream_bitrate(vstream)
-    info.container_bitrate = _to_int(fmt.get("bit_rate"))
-    info.duration = float(fmt.get("duration") or vstream.get("duration") or 0)
-    info.size = _to_int(fmt.get("size"), default=path.stat().st_size)
+    info.container_bitrate = to_int(fmt.get("bit_rate"))
+    info.duration = to_float(fmt.get("duration")) or \
+        to_float(vstream.get("duration"))
+    info.size = to_int(fmt.get("size"), default=0) or _file_size(path)
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
     info.comment = str(tags.get("comment") or tags.get("description") or "")
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
     info.audio_bitrates = [_stream_bitrate(s) for s in astreams]
-    info.audio_channels = [_to_int(s.get("channels"), 2) for s in astreams]
+    info.audio_channels = [to_int(s.get("channels"), 2) for s in astreams]
     info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
     return info
+
+
+def _file_size(path: Path) -> int:
+    try:
+        return path.stat().st_size
+    except OSError:
+        return 0
 
 
 def should_skip(info: VideoInfo, cfg: dict):

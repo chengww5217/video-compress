@@ -5,54 +5,23 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from vcompress import config
 from vcompress.probe import VideoInfo
 
 
 def make_cfg():
-    return {
-        "tools": {"ffmpeg": "", "ffprobe": ""},
-        "skip": {
-            "min_size_mb": 20,
-            "extensions": [".mp4", ".mkv"],
-            "tag_marker": "vcompress",
-            "bpp": {"h264": 0.05, "hevc": 0.03, "vp9": 0.03, "av1": 0.02},
-            "expected_ratio": {"h264": 0.55, "hevc": 0.78, "vp9": 0.80, "av1": 0.92},
-            "min_saving_ratio": 0.15,
-        },
-        "encode": {
-            "encoder": "av1",
-            "output_container": ".mkv",
-            "av1": {"codec": "libsvtav1", "preset": "2", "crf": 28,
-                    "extra": "-svtav1-params tune=0"},
-            "x265": {"codec": "libx265", "preset": "placebo", "crf": 20,
-                     "extra": "-x265-params aq-mode=3"},
-        },
-        "adaptive": {
-            "enabled": True,
-            "target_vmaf": 95.0,
-            "crf_min": 16,
-            "crf_max": 44,
-            "sample_seconds": 30,
-            "search_step": 2,
-        },
-        "audio": {"transcode_over_kbps": 512, "opus_kbps": 160},
-        "verify": {
-            "decode_check": True,
-            "max_duration_diff_s": 0.5,
-            "min_actual_saving": 0.05,
-            "vmaf_enabled": True,
-            "vmaf_segments": 3,
-            "vmaf_sample_seconds": 20,
-            "vmaf_threshold": 93.0,
-            "keep_failed_output": False,
-        },
-        "run": {
-            "workers": 1,
-            "results_file": "results.jsonl",
-            "log_file": "logs/vcompress.log",
-            "use_recycle_bin": False,
-        },
-    }
+    """测试用配置：直接取内置默认值，再改掉少数为了断言好写而收窄的项。
+
+    这样 fixture 不可能和 DEFAULTS 结构漂移——以前两边各写一份，加一个键就
+    要记得改两处。
+    """
+    cfg = config.defaults()
+    cfg["skip"]["extensions"] = [".mp4", ".mkv"]
+    # extra 用短串，参数拼装的断言才好读
+    cfg["encode"]["av1"]["extra"] = "-svtav1-params tune=0"
+    cfg["encode"]["x265"]["extra"] = "-x265-params aq-mode=3"
+    cfg["run"]["results_file"] = "results.jsonl"
+    return cfg
 
 
 def make_info(**kw):
@@ -77,3 +46,8 @@ def make_info(**kw):
     )
     base.update(kw)
     return VideoInfo(**base)
+
+
+class FakeTools:
+    ffmpeg = "ffmpeg"
+    ffprobe = "ffprobe"

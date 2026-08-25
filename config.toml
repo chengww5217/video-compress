@@ -68,4 +68,7 @@ keep_failed_output = false
 workers = 1
 results_file = "logs/results.jsonl"
 log_file = "logs/vcompress.log"
+log_max_bytes = 5242880
+log_backups = 3
 use_recycle_bin = false
+keep_original = false

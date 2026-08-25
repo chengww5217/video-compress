@@ -1,0 +1,230 @@
+"""单个文件的处理流程：探测 -> 判定 -> 编码 -> 校验 -> 落地。
+
+每一步都是独立函数，process_file 只负责串起来和统一的失败/中断处理。
+"""
+
+import logging
+import os
+import threading
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from pathlib import Path
+
+from . import encode, files, probe, proc, verify
+from .progress import ProgressPrinter
+from .results import ResultStore
+from .util import fmt_size
+
+log = logging.getLogger("vcompress")
+
+OK = "ok"
+SKIPPED = "skipped"
+FAILED = "failed"
+DRYRUN = "dryrun"
+ABORTED = "aborted"
+OUTCOMES = (OK, SKIPPED, FAILED, DRYRUN, ABORTED)
+
+
+class RunStats:
+    """本次运行的汇总。并发下由多个线程写，所以带锁。"""
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.counts = Counter({o: 0 for o in OUTCOMES})
+        self.saved_bytes = 0
+
+    def record(self, outcome: str, saved: int = 0) -> str:
+        with self._lock:
+            self.counts[outcome] += 1
+            self.saved_bytes += max(0, saved)
+        return outcome
+
+
+@dataclass(frozen=True)
+class RunContext:
+    """一次运行里所有文件共享的、只读的执行环境。
+
+    以前是 `class Ctx: pass` 加十来处动态赋值——属性名拼错要到运行时才炸，
+    也没法一眼看出一个 worker 到底依赖了什么。
+    """
+
+    cfg: dict
+    tools: probe.Tools
+    caps: encode.Caps
+    store: ResultStore
+    outputs: files.OutputRegistry
+    stats: RunStats = field(default_factory=RunStats)
+    encoder: str = "av1"
+    dry_run: bool = False
+    adaptive: bool = True
+    recycle: bool = False
+    keep: bool = False
+    show_progress: bool = False
+
+    @property
+    def enc_cfg(self) -> dict:
+        return self.cfg["encode"][self.encoder]
+
+    @property
+    def out_ext(self) -> str:
+        return self.cfg["encode"]["output_container"]
+
+    @property
+    def marker(self) -> str:
+        return self.cfg["skip"]["tag_marker"] + "-v1"
+
+    @property
+    def lossless_codec(self) -> str:
+        return self.caps.lossless_codec
+
+    @property
+    def adaptive_enabled(self) -> bool:
+        return self.adaptive and bool(self.cfg["adaptive"].get("enabled", True))
+
+
+def process_file(ctx: RunContext, src: Path) -> str:
+    try:
+        info = probe.probe(ctx.tools, src)
+    except Exception as e:
+        log.error(f"[fail] {src.name}: probe error: {e}")
+        ctx.store.add("failed", None, path=str(src.resolve()), stage="probe",
+                      error=str(e)[:500])
+        return ctx.stats.record(FAILED)
+
+    skip, reason = probe.should_skip(info, ctx.cfg)
+    if skip:
+        log.info(f"[skip] {src.name}: {reason}")
+        ctx.store.add("skipped", info, reason=reason)
+        return ctx.stats.record(SKIPPED)
+
+    if ctx.dry_run:
+        log.info(f"[dry-run] would encode {src.name} "
+                 f"({info.codec_family or info.video_codec}, "
+                 f"{fmt_size(info.size)})")
+        ctx.store.add("dryrun", info)
+        return ctx.stats.record(DRYRUN)
+
+    return _compress(ctx, src, info)
+
+
+def _compress(ctx: RunContext, src: Path, info) -> str:
+    tmp = files.tmp_path(src, ctx.out_ext)
+    printer = ProgressPrinter(src.name, ctx.show_progress)
+    try:
+        # 先把输出名定下来（并登记预留），别编码几小时后才发现名字冲突
+        target = src.with_suffix(ctx.out_ext)
+        ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
+
+        crf, elapsed = _encode(ctx, src, info, tmp, printer)
+        printer.close()
+
+        out_info = probe.probe(ctx.tools, tmp)
+        score = verify.run_all(ctx.tools, src, tmp, info, out_info, ctx.cfg,
+                               log=log, lossless_codec=ctx.lossless_codec)
+        if score is not None:
+            log.info(f"[verify] {src.name}: vmaf {score:.2f}")
+
+        saved = _commit(ctx, src, tmp, target, info, crf, elapsed)
+        return ctx.stats.record(OK, saved)
+    except BaseException as exc:  # noqa: BLE001 - 中断也要走清理
+        printer.close()
+        return _handle_failure(ctx, src, info, tmp, exc)
+    finally:
+        ctx.outputs.release(src)
+
+
+def _encode(ctx: RunContext, src: Path, info, tmp: Path,
+            printer: ProgressPrinter):
+    """跑主编码，返回 (实际使用的 crf, 耗时秒)。"""
+    supported = encode.encoder_pix_fmts(ctx.tools.ffmpeg,
+                                        ctx.enc_cfg["codec"])
+    enc_cfg = encode.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
+
+    crf = int(enc_cfg["crf"])
+    if ctx.adaptive_enabled and info.duration > 0:
+        picked = encode.pick_crf_adaptive(
+            ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
+            ctx.lossless_codec,
+        )
+        if picked is not None:
+            crf = picked
+
+    cmd = encode.build_cmd(
+        ctx.tools.ffmpeg, src, tmp, enc_cfg, crf,
+        encode.audio_args(info, ctx.cfg),
+        encode.subtitle_args(info, ctx.out_ext),
+        ctx.marker,
+        info.comment,
+    )
+    log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
+    printer(0.0)
+    t0 = time.monotonic()
+    encode.run_encode(cmd, info.duration, printer)
+    elapsed = time.monotonic() - t0
+    printer(100.0)
+    return crf, elapsed
+
+
+def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
+            crf: int, elapsed: float) -> int:
+    """把临时产物换成正式文件并按配置处理原文件，返回省下的字节数。
+
+    输出名在编码前已经定过一次，这里再定一次：几小时里目标名可能被别的东西
+    占了，宁可改名也不能覆盖。
+    """
+    final = ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep,
+                             log)
+    in_place = not ctx.keep and files.same_path(final, src)
+    if in_place and ctx.recycle:
+        # 原地替换时先把原文件送进回收站，os.replace 才不会直接毁掉它
+        files.trash(src)
+    os.replace(tmp, final)
+    if not ctx.keep and not in_place:
+        files.delete_original(src, ctx.recycle)
+
+    new_size = final.stat().st_size
+    saved = max(0, info.size - new_size)
+    saving = saved / info.size if info.size else 0.0
+    kept = ", original kept" if ctx.keep else ""
+    log.info(
+        f"[ok] {src.name}: crf={crf} saved {saving:.1%} "
+        f"({fmt_size(info.size)} -> {fmt_size(new_size)}, "
+        f"{elapsed:.0f}s{kept})"
+    )
+    ctx.store.add("ok", info, output=str(final), crf=crf, new_size=new_size,
+                  saving=round(saving, 4), seconds=round(elapsed, 1),
+                  kept=ctx.keep)
+    return saved
+
+
+def _handle_failure(ctx: RunContext, src: Path, info, tmp: Path,
+                    exc: BaseException) -> str:
+    """统一的失败/中断收尾。
+
+    中断必须和普通失败分开处理：Ctrl+C 时不该把半成品留成 .failed.mkv，也不该
+    记一条 failed；而且 KeyboardInterrupt 要继续往上抛，否则串行模式下主循环
+    会接着处理下一个文件。
+    """
+    interrupted = isinstance(exc, KeyboardInterrupt) or proc.is_cancelled()
+    if interrupted:
+        # 串行模式下信号只打到主线程，子进程还活着，这里补一刀
+        proc.terminate_all()
+        files.remove_tmp(tmp)
+        log.info(f"[abort] {src.name}: interrupted")
+        if isinstance(exc, BaseException) and not isinstance(exc, Exception):
+            raise exc
+        return ctx.stats.record(ABORTED)
+
+    if not isinstance(exc, Exception):
+        raise exc  # SystemExit / MemoryError 这类不该被当成“这个文件失败了”
+
+    log.error(f"[fail] {src.name}: {exc}")
+    kept_tmp = None
+    if ctx.cfg["verify"].get("keep_failed_output", False):
+        kept_tmp = files.keep_failed_output(tmp, src, ctx.out_ext)
+    ctx.store.add("failed", info, stage="process", error=str(exc)[:500],
+                  failed_output=str(kept_tmp) if kept_tmp else None)
+    if kept_tmp is None:
+        files.remove_tmp(tmp)
+    return ctx.stats.record(FAILED)

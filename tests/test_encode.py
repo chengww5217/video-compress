@@ -1,4 +1,4 @@
-﻿import sys
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import encode
+from vcompress import encode, proc
 
 
 class AudioArgsTests(unittest.TestCase):
@@ -175,16 +175,19 @@ class BuildCmdTests(unittest.TestCase):
 
 class ParseProgressTests(unittest.TestCase):
     def test_out_time_us_is_seconds(self):
-        self.assertEqual(encode._parse_progress_line("out_time_us=4000000"), 4.0)
+        self.assertEqual(encode._parse_progress_line("out_time_us=4000000"),
+                         ("out_time_us", 4.0))
 
     def test_out_time_ms_actually_microseconds(self):
-        self.assertEqual(encode._parse_progress_line("out_time_ms=1500000"), 1.5)
+        self.assertEqual(encode._parse_progress_line("out_time_ms=1500000"),
+                         ("out_time_ms", 1.5))
 
     def test_ignores_non_time_keys(self):
         self.assertIsNone(encode._parse_progress_line("frame=60"))
         self.assertIsNone(encode._parse_progress_line("fps=12.5"))
         self.assertIsNone(encode._parse_progress_line("progress=continue"))
         self.assertIsNone(encode._parse_progress_line("no equals sign"))
+        self.assertIsNone(encode._parse_progress_line("out_time=00:00:01.0"))
 
     def test_na_time_value(self):
         self.assertIsNone(encode._parse_progress_line("out_time_us=N/A"))
@@ -194,6 +197,36 @@ class ParseProgressTests(unittest.TestCase):
         self.assertAlmostEqual(encode._parse_speed("speed=1.25x"), 1.25)
         self.assertIsNone(encode._parse_speed("speed=N/A"))
         self.assertIsNone(encode._parse_speed("frame=60"))
+
+
+class ProgressCallbackTests(unittest.TestCase):
+    """ffmpeg 每次刷新会同时发 out_time_us / out_time_ms / out_time，
+    认多个键就会让同一个时刻回调多次：进度条重画、速度平滑被污染。"""
+
+    def test_one_refresh_produces_one_callback(self):
+        script = (
+            "import sys\n"
+            "for us in (1000000, 2000000, 3000000):\n"
+            "    sys.stdout.write('frame=%d\\n' % us)\n"
+            "    sys.stdout.write('out_time_us=%d\\n' % us)\n"
+            "    sys.stdout.write('out_time_ms=%d\\n' % us)\n"
+            "    sys.stdout.write('out_time=00:00:0%d.000000\\n' % (us // 1000000))\n"
+            "    sys.stdout.write('progress=continue\\n')\n"
+        )
+        calls = []
+        encode.run_encode([sys.executable, "-u", "-c", script], 10.0,
+                          lambda pct, eta, spd: calls.append(round(pct, 3)))
+        self.assertEqual(len(calls), 3, calls)
+        self.assertEqual(calls, sorted(calls))
+
+    def test_falls_back_to_whatever_key_the_build_emits(self):
+        script = ("import sys\n"
+                  "sys.stdout.write('out_time_ms=5000000\\n')\n")
+        calls = []
+        encode.run_encode([sys.executable, "-u", "-c", script], 10.0,
+                          lambda pct, eta, spd: calls.append(pct))
+        self.assertEqual(len(calls), 1)
+        self.assertAlmostEqual(calls[0], 50.0)
 
 
 class RunEncodeStderrTests(unittest.TestCase):
@@ -215,7 +248,7 @@ class RunEncodeStderrTests(unittest.TestCase):
         t.start()
         t.join(timeout)
         if t.is_alive():
-            encode.terminate_all()
+            proc.terminate_all()
             t.join(10)
             self.fail(f"run_encode did not finish within {timeout}s (deadlock)")
         return result
@@ -378,6 +411,147 @@ class VmafLavfiTests(unittest.TestCase):
         lavfi = encode.vmaf_lavfi(-2)
         self.assertIn("[1:v]trim=start_frame=2,setpts", lavfi)
         self.assertIn("[0:v]setpts", lavfi)
+
+
+class PixFmtTests(unittest.TestCase):
+    """libsvtav1 只吃 4:2:0；不归一化的话 4:2:2 源（ProRes、部分 mov）直接失败。"""
+
+    SVT = {"yuv420p", "yuv420p10le"}
+    X265 = {"yuv420p", "yuv420p10le", "yuv422p", "yuv422p10le", "yuv444p"}
+
+    def test_supported_format_is_left_alone(self):
+        self.assertIsNone(encode.choose_pix_fmt("yuv420p", self.SVT))
+        self.assertIsNone(encode.choose_pix_fmt("yuv420p10le", self.SVT))
+
+    def test_unknown_capabilities_change_nothing(self):
+        self.assertIsNone(encode.choose_pix_fmt("yuv422p", set()))
+        self.assertIsNone(encode.choose_pix_fmt("", self.SVT))
+
+    def test_bit_depth_is_preserved_when_subsampling(self):
+        self.assertEqual(encode.choose_pix_fmt("yuv422p10le", self.SVT),
+                         "yuv420p10le")
+        self.assertEqual(encode.choose_pix_fmt("yuv444p10le", self.SVT),
+                         "yuv420p10le")
+
+    def test_eight_bit_stays_eight_bit(self):
+        self.assertEqual(encode.choose_pix_fmt("yuv422p", self.SVT), "yuv420p")
+
+    def test_higher_depth_degrades_to_the_closest_available(self):
+        self.assertEqual(encode.choose_pix_fmt("yuv420p12le", self.SVT),
+                         "yuv420p10le")
+
+    def test_x265_keeps_422(self):
+        self.assertIsNone(encode.choose_pix_fmt("yuv422p", self.X265))
+
+    def test_depth_parsing(self):
+        self.assertEqual(encode.pix_fmt_depth("yuv420p"), 8)
+        self.assertEqual(encode.pix_fmt_depth("yuv420p10le"), 10)
+        self.assertEqual(encode.pix_fmt_depth("yuv444p12be"), 12)
+        self.assertEqual(encode.pix_fmt_depth(""), 8)
+
+    def test_with_pix_fmt_adds_the_flag_and_warns(self):
+        warnings = []
+        log = _FakeLog(warnings)
+        cfg = encode.with_pix_fmt(make_cfg()["encode"]["av1"], "yuv422p",
+                                  self.SVT, log)
+        self.assertEqual(cfg["pix_fmt"], "yuv420p")
+        self.assertIn("yuv422p", warnings[0])
+        self.assertIn("-pix_fmt", encode.video_args(cfg, 30))
+        self.assertEqual(encode.video_args(cfg, 30)[7], "yuv420p")
+
+    def test_with_pix_fmt_respects_an_explicit_setting(self):
+        base = dict(make_cfg()["encode"]["av1"], pix_fmt="yuv420p10le")
+        cfg = encode.with_pix_fmt(base, "yuv422p", self.SVT, None)
+        self.assertEqual(cfg["pix_fmt"], "yuv420p10le")
+
+    def test_with_pix_fmt_does_not_mutate_the_input(self):
+        base = make_cfg()["encode"]["av1"]
+        encode.with_pix_fmt(base, "yuv422p", self.SVT, None)
+        self.assertNotIn("pix_fmt", base)
+
+    def test_hopeless_format_warns_instead_of_guessing(self):
+        warnings = []
+        cfg = encode.with_pix_fmt(make_cfg()["encode"]["av1"], "rgb24",
+                                  {"gray"}, _FakeLog(warnings))
+        self.assertNotIn("pix_fmt", cfg)
+        self.assertIn("may fail", warnings[0])
+
+
+class _FakeLog:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def warning(self, msg):
+        self.sink.append(str(msg))
+
+    def info(self, msg):
+        pass
+
+    def debug(self, msg):
+        pass
+
+
+class MergeCommentTests(unittest.TestCase):
+    """-map_metadata 0 会带来原始 comment，标记要追加而不是覆盖。"""
+
+    def test_empty_original_gets_just_the_marker(self):
+        self.assertEqual(encode.merge_comment("", "vcompress-v1"),
+                         "vcompress-v1")
+        self.assertEqual(encode.merge_comment(None, "vcompress-v1"),
+                         "vcompress-v1")
+
+    def test_existing_comment_is_preserved(self):
+        got = encode.merge_comment("ripped by someone", "vcompress-v1")
+        self.assertIn("ripped by someone", got)
+        self.assertIn("vcompress-v1", got)
+
+    def test_marker_is_not_appended_twice(self):
+        once = encode.merge_comment("note | vcompress-v1", "vcompress-v1")
+        self.assertEqual(once.count("vcompress-v1"), 1)
+
+    def test_build_cmd_carries_the_original_comment(self):
+        cfg = make_cfg()
+        cmd = encode.build_cmd("ffmpeg", Path("in.mp4"), Path("out.tmp.mkv"),
+                               cfg["encode"]["av1"], 27, [], [],
+                               "vcompress-v1", "director's cut")
+        value = cmd[cmd.index("-metadata") + 1]
+        self.assertIn("director's cut", value)
+        self.assertIn("vcompress-v1", value)
+
+
+class CapsTests(unittest.TestCase):
+    def test_x264_is_preferred_for_sampling(self):
+        caps = encode.Caps(encoders=frozenset({"libx264", "libsvtav1"}))
+        self.assertEqual(caps.lossless_codec, "libx264")
+
+    def test_ffv1_is_the_fallback(self):
+        caps = encode.Caps(encoders=frozenset({"libsvtav1"}))
+        self.assertEqual(caps.lossless_codec, "ffv1")
+
+    def test_unknown_build_assumes_x264(self):
+        self.assertFalse(encode.Caps().known)
+        self.assertEqual(encode.Caps().lossless_codec, "libx264")
+
+    def test_lossless_args(self):
+        self.assertEqual(encode.lossless_args("libx264"),
+                         ["-c:v", "libx264", "-crf", "0", "-preset", "ultrafast"])
+        self.assertEqual(encode.lossless_args("ffv1"),
+                         ["-c:v", "ffv1", "-level", "1"])
+
+
+class SegmentStreamSelectionTests(unittest.TestCase):
+    def test_attached_pictures_are_excluded(self):
+        """0:v:0 会把封面图当视频流；真编码用的是 0:V，两边必须取同一条流。"""
+        cmd = encode.segment_cmd("ffmpeg", Path("in.mp4"), 10.0, 5.0,
+                                 Path("o.mkv"))
+        self.assertIn("0:V:0", cmd)
+        self.assertNotIn("0:v:0", cmd)
+
+    def test_codec_is_configurable(self):
+        cmd = encode.segment_cmd("ffmpeg", Path("in.mp4"), 10.0, 5.0,
+                                 Path("o.mkv"), "ffv1")
+        self.assertIn("ffv1", cmd)
+        self.assertNotIn("-crf", cmd)
 
 
 class AdaptiveFallbackTests(unittest.TestCase):

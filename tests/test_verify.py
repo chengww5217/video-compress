@@ -1,7 +1,8 @@
-﻿import sys
+import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -73,6 +74,92 @@ class CheckBasicTests(unittest.TestCase):
         ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
         self.assertTrue(ok, msg)
 
+    def test_resolution_change_fails(self):
+        """滤镜链写错或编码器悄悄降采样，这里必须拦住。"""
+        out = make_info(video_codec="av1", duration=600.0,
+                        width=1280, height=720)
+        ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("resolution changed 1920x1080 -> 1280x720", msg)
+
+    def test_unknown_resolution_is_not_a_failure(self):
+        out = make_info(video_codec="av1", duration=600.0, width=0, height=0)
+        ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
+        self.assertTrue(ok, msg)
+
+
+class RunAllTests(unittest.TestCase):
+    """校验链的编排：便宜的检查先跑，环境缺能力只告警，画质不过才算失败。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+        self.orig = make_info(duration=600.0, size=100_000)
+        self.out_info = make_info(video_codec="av1", duration=600.0)
+        self.tmp = tempfile.TemporaryDirectory()
+        self.out = Path(self.tmp.name) / "a.tmp.mkv"
+        self.out.write_bytes(b"x" * 40_000)
+        self.calls = []
+        self.decode = None
+        self.spot = (96.0, "")
+        self.orig_decode = verify.decode_errors
+        self.orig_spot = verify.vmaf_spot_check
+        verify.decode_errors = self.fake_decode
+        verify.vmaf_spot_check = self.fake_spot
+
+    def tearDown(self):
+        verify.decode_errors = self.orig_decode
+        verify.vmaf_spot_check = self.orig_spot
+        self.tmp.cleanup()
+
+    def fake_decode(self, ffmpeg, path):
+        self.calls.append("decode")
+        return self.decode
+
+    def fake_spot(self, *a, **kw):
+        self.calls.append("vmaf")
+        return self.spot
+
+    def run_all(self):
+        return verify.run_all(FakeTools(), Path("src.mp4"), self.out,
+                              self.orig, self.out_info, self.cfg)
+
+    def test_happy_path_returns_the_score(self):
+        self.assertAlmostEqual(self.run_all(), 96.0)
+        self.assertEqual(self.calls, ["decode", "vmaf"])
+
+    def test_decode_failure_stops_before_the_expensive_check(self):
+        self.decode = ["Invalid data found"]
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("decode check failed", str(cm.exception))
+        self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
+
+    def test_decode_check_can_be_disabled(self):
+        self.cfg["verify"]["decode_check"] = False
+        self.run_all()
+        self.assertEqual(self.calls, ["vmaf"])
+
+    def test_basic_failure_stops_before_vmaf(self):
+        self.out_info.duration = 700.0
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("duration mismatch", str(cm.exception))
+        self.assertEqual(self.calls, ["decode"])
+
+    def test_low_vmaf_is_a_failure(self):
+        self.spot = (70.0, "vmaf mean 70.00 below threshold 93.0")
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("below threshold", str(cm.exception))
+
+    def test_unavailable_vmaf_only_warns(self):
+        self.spot = (None, "libvmaf failed: no such filter")
+        self.assertIsNone(self.run_all())
+
+    def test_disabled_vmaf_passes(self):
+        self.spot = (None, "")
+        self.assertIsNone(self.run_all())
+
 
 class VmafSpotCheckTests(unittest.TestCase):
     """用替身挡掉 ffmpeg，只验证参数处理与结果判定。"""
@@ -86,7 +173,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.shifts = []
         self.orig_extract = encode.extract_segment
         self.orig_score = encode.vmaf_score
-        encode.extract_segment = lambda ff, src, start, secs, out: \
+        encode.extract_segment = lambda ff, src, start, secs, out, codec="libx264": \
             self.extracted.append((Path(src).name, round(start, 3)))
         encode.vmaf_score = self.fake_score
 
