@@ -9,6 +9,8 @@ import os
 import threading
 from pathlib import Path
 
+from .logfmt import em
+
 log = logging.getLogger("vcompress")
 
 # 本工具自己产出的中间/废弃产物，扫描时必须排除，否则下一轮会把它们当片源
@@ -69,9 +71,9 @@ def clean_stale_tmp(files, out_ext: str):
         try:
             t.unlink()
             removed += 1
-            log.warning(f"removed stale temp file: {t.name}")
+            log.warning(f"清掉了上次留下的临时文件 {em(t.name)}")
         except OSError as e:
-            log.error(f"cannot remove stale temp {t}: {e}")
+            log.error(f"删不掉残留的临时文件 {t}：{e}")
     return removed
 
 
@@ -103,12 +105,12 @@ def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
     alt = src.with_name(f"{src.stem}.{encoder}{out_ext}")
     if busy(alt):
         raise RuntimeError(
-            f"output already exists, refusing to overwrite: {target.name} "
-            f"(fallback {alt.name} is taken too)"
+            f"输出名 {target.name} 已被占用，不覆盖已有文件"
+            f"（备用名 {alt.name} 也被占了）"
         )
     if logger:
-        logger.warning(f"{target.name} already exists and is not the source; "
-                       f"writing to {alt.name} instead")
+        logger.warning(f"{target.name} 已存在且不是源文件，改写到 "
+                       f"{em(alt.name)}")
     return alt
 
 
@@ -149,15 +151,15 @@ def keep_failed_output(tmp: Path, src: Path, out_ext: str):
         return None
     dest = failed_path(src, out_ext)
     if dest.exists():
-        log.warning(f"{dest.name} already exists; discarding {tmp.name} instead")
+        log.warning(f"{dest.name} 已存在，只能丢弃产物 {tmp.name}")
         return None
     try:
         os.replace(tmp, dest)
     except OSError as e:
-        log.error(f"cannot keep failed output {dest.name}: {e}")
+        log.error(f"留不下校验失败的产物 {dest.name}：{e}")
         return None
-    log.warning(f"kept the rejected output for inspection: {dest.name} "
-                f"(original untouched)")
+    log.warning(f"校验没过的产物留成了 {em(dest.name)} 供检查"
+                f"（原文件未动）")
     return dest
 
 
@@ -165,9 +167,9 @@ def remove_tmp(tmp: Path) -> None:
     if tmp.exists():
         try:
             tmp.unlink()
-            log.info(f"cleaned temp file: {tmp.name}")
+            log.debug(f"清掉临时文件 {tmp.name}")
         except OSError as e:
-            log.warning(f"cannot remove temp file {tmp.name}: {e}")
+            log.warning(f"删不掉临时文件 {tmp.name}：{e}")
 
 
 def delete_original(path: Path, recycle: bool) -> None:
@@ -181,7 +183,7 @@ def trash(path: Path) -> None:
     try:
         from send2trash import send2trash
     except ImportError:
-        log.warning("send2trash not installed; permanently deleting instead")
+        log.warning("没装 send2trash，改为直接永久删除")
         path.unlink()
         return
     send2trash(str(path))

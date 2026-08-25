@@ -23,7 +23,7 @@ def decode_errors(ffmpeg: str, path: Path):
     if errs:
         return errs[:10]
     if rc != 0:
-        return [f"decode exited {rc} without printing a diagnostic"]
+        return [f"解码进程退出码 {rc}，但没打印任何诊断信息"]
     return None
 
 
@@ -32,29 +32,29 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
     if orig_info.duration > 0 and out_info.duration > 0:
         diff = abs(orig_info.duration - out_info.duration)
         if diff > max_diff:
-            return False, f"duration mismatch {diff:.2f}s > {max_diff}s"
+            return False, f"时长差了 {diff:.2f}s，超过允许的 {max_diff}s"
     if not out_info.video_codec:
-        return False, "output has no video stream"
+        return False, "产物里没有视频流"
     # 分辨率必须一致：滤镜链写错、编码器悄悄降采样都会在这里暴露
     if orig_info.width and orig_info.height and out_info.width and out_info.height:
         if (orig_info.width, orig_info.height) != (out_info.width, out_info.height):
             return False, (
-                f"resolution changed {orig_info.width}x{orig_info.height} -> "
+                f"分辨率变了：{orig_info.width}x{orig_info.height} -> "
                 f"{out_info.width}x{out_info.height}"
             )
     for kind, before, after in (
-        ("audio", len(orig_info.audio_codecs), len(out_info.audio_codecs)),
-        ("subtitle", len(orig_info.subtitle_codecs),
+        ("音轨", len(orig_info.audio_codecs), len(out_info.audio_codecs)),
+        ("字幕", len(orig_info.subtitle_codecs),
          len(out_info.subtitle_codecs)),
     ):
         if before != after:
-            return False, f"{kind} stream count changed {before} -> {after}"
+            return False, f"{kind}条数变了：{before} -> {after}"
     if new_size >= orig_size:
-        return False, f"output {new_size} bytes >= source {orig_size} bytes"
+        return False, f"产物 {new_size} 字节，没比源文件 {orig_size} 字节小"
     min_saving = to_float(cfg["verify"].get("min_actual_saving"), 0.05)
     saving = 1.0 - new_size / orig_size
     if saving < min_saving:
-        return False, f"saving only {saving:.1%} < {min_saving:.0%}, discarding"
+        return False, f"实际只省了 {saving:.1%}，低于要求的 {min_saving:.0%}，丢弃产物"
     return True, ""
 
 
@@ -85,14 +85,14 @@ def check_color(orig_info, out_info, cfg):
         if not before:
             continue
         if after != before:
-            problems.append(f"{label} {before} -> {after or 'unset'}")
+            problems.append(f"{label} {before} -> {after or '未标注'}")
     before_hdr = set(getattr(orig_info, "hdr_metadata", ()) or ())
     after_hdr = set(getattr(out_info, "hdr_metadata", ()) or ())
     lost = sorted(before_hdr - after_hdr)
     if lost:
-        problems.append("lost " + ", ".join(lost))
+        problems.append("丢了 " + ", ".join(lost))
     if problems:
-        return False, "color metadata changed: " + "; ".join(problems)
+        return False, "色彩/HDR 元数据变了：" + "；".join(problems)
     return True, ""
 
 
@@ -134,9 +134,9 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
             best, best_shift = alt, shift
     if best_shift and log:
         log.warning(
-            f"vmaf segment {index} at {start:.1f}s scored {score:.2f}; "
-            f"realigning by {best_shift:+d} frame gives {best:.2f} — "
-            f"treating the low score as a sampling offset"
+            f"第 {index} 段（{start:.1f}s 处）只有 VMAF {score:.2f}，"
+            f"错开 {best_shift:+d} 帧再量得 {best:.2f}，"
+            f"判定为抽样错帧而不是真的画质崩了"
         )
     return best
 
@@ -153,7 +153,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
     if seconds <= 0:
         seconds = 20.0
     if duration <= 0:
-        return None, "unknown duration, cannot pick sample points"
+        return None, "不知道时长，选不了抽样点"
 
     records = []
     # 两个文件用同一批切点，且切在帧间隙里，抽出的段才逐帧对应
@@ -164,7 +164,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
             ref = root / f"ref{i}.mkv"
             dist = root / f"dist{i}.mkv"
             if log:
-                log.info(f"vmaf spot check: segment {i + 1}/{len(starts)}")
+                log.info(f"[校验] VMAF 抽检第 {i + 1}/{len(starts)} 段")
             try:
                 vmaf.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
                                      lossless_codec)
@@ -173,12 +173,12 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                 score = _score_segment(tools, ref, dist, threshold, i + 1,
                                        start, log, model)
                 if log:
-                    log.debug(f"vmaf segment {i + 1} at {start:.1f}s: {score:.2f}")
+                    log.debug(f"[校验] 第 {i + 1} 段（{start:.1f}s 处）VMAF {score:.2f}")
                 records.append((start, score))
             except vmaf.VmafError as e:
                 return None, str(e)
     if not records:
-        return None, "no vmaf segment could be measured"
+        return None, "一段 VMAF 都没量出来"
     mean = sum(s for _t, s in records) / len(records)
     floor = to_float(vcfg.get("vmaf_min_segment"), 0.0)
     worst_t, worst = min(records, key=lambda r: r[1])
@@ -186,13 +186,13 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
     # 的十几分钟是看得出来的。所以除了均值，再给单段设一条下限。
     if floor > 0 and worst < floor:
         return mean, (
-            f"vmaf segment at {worst_t:.0f}s scored {worst:.2f}, below the "
-            f"per-segment floor {floor} (segments: {_fmt_segments(records)})"
+            f"{worst_t:.0f}s 处那段只有 VMAF {worst:.2f}，低于单段下限 "
+            f"{floor}（各段：{_fmt_segments(records)}）"
         )
     if mean < threshold:
         return mean, (
-            f"vmaf mean {mean:.2f} below threshold {threshold} "
-            f"(segments: {_fmt_segments(records)})"
+            f"VMAF 均值 {mean:.2f} 低于阈值 {threshold}"
+            f"（各段：{_fmt_segments(records)}）"
         )
     return mean, ""
 
@@ -207,7 +207,7 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     if cfg["verify"].get("decode_check", True):
         errs = decode_errors(tools.ffmpeg, out)
         if errs:
-            raise VerifyError("decode check failed: " + "; ".join(errs[:3]))
+            raise VerifyError("解码校验没过：" + "；".join(errs[:3]))
 
     ok, msg = check_basic(orig_info, out_info, orig_info.size,
                           out.stat().st_size, cfg)
@@ -225,7 +225,7 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     if msg and score is None:
         # 构建里没有 libvmaf 之类的环境问题：告警但不否决，其余检查已经过了
         if log:
-            log.warning(f"{src.name}: vmaf check unavailable ({msg}); proceeding")
+            log.warning(f"{src.name}：这次量不了 VMAF（{msg}），其余检查已通过，继续")
     elif msg:
         raise VerifyError(msg)
     return score

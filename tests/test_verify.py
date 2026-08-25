@@ -33,7 +33,7 @@ class CheckColorTests(unittest.TestCase):
         out = self.hdr_info(color_transfer="")
         ok, msg = check_color(self.hdr_info(), out, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("transfer smpte2084 -> unset", msg)
+        self.assertIn("transfer smpte2084 -> 未标注", msg)
 
     def test_changed_primaries_fails(self):
         out = self.hdr_info(color_primaries="bt709")
@@ -45,7 +45,7 @@ class CheckColorTests(unittest.TestCase):
         out = self.hdr_info(hdr_metadata=["content-light-level"])
         ok, msg = check_color(self.hdr_info(), out, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("lost mastering-display", msg)
+        self.assertIn("丢了 mastering-display", msg)
 
     def test_untagged_source_gaining_defaults_is_fine(self):
         """源本来没标，编码器补了默认值，不算退化。"""
@@ -77,25 +77,25 @@ class CheckBasicTests(unittest.TestCase):
         out = make_info(video_codec="av1", duration=601.5)
         ok, msg = check_basic(self.orig, out, 100, 50, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("duration", msg)
+        self.assertIn("时长", msg)
 
     def test_missing_video_stream_fails(self):
         out = make_info(video_codec="", duration=600.0)
         ok, msg = check_basic(self.orig, out, 100, 50, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("video stream", msg)
+        self.assertIn("没有视频流", msg)
 
     def test_output_not_smaller_fails(self):
         out = make_info(video_codec="av1", duration=600.0)
         ok, msg = check_basic(self.orig, out, 100, 101, self.cfg)
         self.assertFalse(ok)
-        self.assertIn(">=", msg)
+        self.assertIn("没比源文件", msg)
 
     def test_tiny_saving_discarded(self):
         out = make_info(video_codec="av1", duration=600.0)
         ok, msg = check_basic(self.orig, out, 100_000_000, 98_000_000, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("discarding", msg)
+        self.assertIn("丢弃产物", msg)
 
     def test_dropped_audio_track_fails(self):
         orig = make_info(duration=600.0, audio_codecs=["dts", "aac"],
@@ -106,7 +106,7 @@ class CheckBasicTests(unittest.TestCase):
                         audio_channels=[6])
         ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("audio stream count changed 2 -> 1", msg)
+        self.assertIn("音轨条数变了：2 -> 1", msg)
 
     def test_dropped_subtitle_fails(self):
         orig = make_info(duration=600.0, subtitle_codecs=["subrip", "ass"])
@@ -114,7 +114,7 @@ class CheckBasicTests(unittest.TestCase):
                         subtitle_codecs=["subrip"])
         ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("subtitle stream count changed 2 -> 1", msg)
+        self.assertIn("字幕条数变了：2 -> 1", msg)
 
     def test_converted_streams_with_same_count_pass(self):
         orig = make_info(duration=600.0, audio_codecs=["flac"],
@@ -130,7 +130,7 @@ class CheckBasicTests(unittest.TestCase):
                         width=1280, height=720)
         ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
         self.assertFalse(ok)
-        self.assertIn("resolution changed 1920x1080 -> 1280x720", msg)
+        self.assertIn("分辨率变了：1920x1080 -> 1280x720", msg)
 
     def test_unknown_resolution_is_not_a_failure(self):
         out = make_info(video_codec="av1", duration=600.0, width=0, height=0)
@@ -181,7 +181,7 @@ class RunAllTests(unittest.TestCase):
         self.decode = ["Invalid data found"]
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
-        self.assertIn("decode check failed", str(cm.exception))
+        self.assertIn("解码校验没过", str(cm.exception))
         self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
 
     def test_decode_check_can_be_disabled(self):
@@ -193,7 +193,7 @@ class RunAllTests(unittest.TestCase):
         self.out_info.duration = 700.0
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
-        self.assertIn("duration mismatch", str(cm.exception))
+        self.assertIn("时长差了", str(cm.exception))
         self.assertEqual(self.calls, ["decode"])
 
     def test_color_metadata_loss_stops_before_vmaf(self):
@@ -201,7 +201,7 @@ class RunAllTests(unittest.TestCase):
         self.out_info.color_transfer = ""
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
-        self.assertIn("color metadata changed", str(cm.exception))
+        self.assertIn("色彩/HDR 元数据变了", str(cm.exception))
         self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
 
     def test_low_vmaf_is_a_failure(self):
@@ -282,7 +282,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.scores = [80.0, 82.0]
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 81.0)
-        self.assertIn("below threshold", msg)
+        self.assertIn("低于阈值", msg)
         self.assertIn("80.00", msg)
         self.assertIn("82.00", msg)
 
@@ -292,7 +292,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.scores = [99.0, 99.0, 81.0]
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 93.0)
-        self.assertIn("per-segment floor", msg)
+        self.assertIn("低于单段下限", msg)
         self.assertIn("81.00", msg)
 
     def test_per_segment_floor_can_be_disabled(self):
@@ -319,7 +319,7 @@ class VmafSpotCheckTests(unittest.TestCase):
     def test_unknown_duration_is_reported(self):
         mean, msg = self.check(duration=0.0)
         self.assertIsNone(mean)
-        self.assertIn("duration", msg)
+        self.assertIn("时长", msg)
         self.assertEqual(self.extracted, [])
 
     def test_ffmpeg_failure_is_surfaced_not_raised(self):

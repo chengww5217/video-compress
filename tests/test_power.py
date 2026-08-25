@@ -7,7 +7,7 @@ import tempfile
 import unittest
 from unittest import mock
 
-from vcompress import config, power
+from vcompress import config, logfmt, power
 
 
 class _Capture(logging.Handler):
@@ -36,7 +36,7 @@ class _Base(unittest.TestCase):
         self.tmp.cleanup()
 
     def messages(self):
-        return "\n".join(self.logs)
+        return logfmt.strip_marks("\n".join(self.logs))
 
     def write_cfg(self, body: str) -> Path:
         p = self.root / "config.toml"
@@ -79,12 +79,12 @@ class ReadFlagTests(_Base):
     def test_broken_toml_does_not_raise(self):
         p = self.write_cfg("[run\nshutdown_when_done = true\n")
         self.assertFalse(power.read_flag(p))
-        self.assertIn("cannot re-read", self.messages())
+        self.assertIn("重读", self.messages())
 
     def test_non_boolean_is_refused(self):
         p = self.write_cfg('[run]\nshutdown_when_done = "true"\n')
         self.assertFalse(power.read_flag(p))
-        self.assertIn("not a boolean", self.messages())
+        self.assertIn("不是布尔值", self.messages())
 
     def test_the_flag_is_read_from_disk_not_from_the_loaded_config(self):
         """跑到一半改配置必须生效，这是整个功能的前提。"""
@@ -112,7 +112,7 @@ class DisarmTests(_Base):
     def test_missing_key_is_a_failure(self):
         p = self.write_cfg("[run]\nworkers = 2\n")
         self.assertFalse(power.disarm(p))
-        self.assertIn("cannot find", self.messages())
+        self.assertIn("找不到", self.messages())
 
     def test_a_key_in_another_section_is_left_alone(self):
         p = self.write_cfg(
@@ -176,7 +176,7 @@ class MaybeShutdownTests(_Base):
         p = self.write_cfg("[run]\nshutdown_when_done = false\n")
         self.assertFalse(power.maybe_shutdown(p, 0, runner=self.runner()))
         self.assertEqual(self.calls, [])
-        self.assertIn("leaving the machine running", self.messages())
+        self.assertIn("机器保持运行", self.messages())
 
     def test_on_disarms_first_then_shuts_down(self):
         p = self.write_cfg("[run]\nshutdown_when_done = true\n")
@@ -214,7 +214,7 @@ class MaybeShutdownTests(_Base):
                 mock.patch("time.sleep", side_effect=KeyboardInterrupt):
             self.assertFalse(power.maybe_shutdown(p, 5, runner=self.runner()))
         self.assertEqual(self.calls, [])
-        self.assertIn("cancelled", self.messages())
+        self.assertIn("已取消自动关机", self.messages())
 
 
 class AnnounceTests(_Base):
@@ -222,21 +222,21 @@ class AnnounceTests(_Base):
         p = self.write_cfg("[run]\nshutdown_when_done = false\n")
         power.announce(p, False, 60)
         msg = self.messages()
-        self.assertIn("auto shutdown: OFF", msg)
-        self.assertIn("shutdown_when_done = true", msg)
+        self.assertIn("自动关机：关", msg)
+        self.assertIn("shutdown_when_done 改成 true", msg)
         self.assertIn(str(p), msg)
 
     def test_on_says_how_to_cancel(self):
         p = self.write_cfg("[run]\nshutdown_when_done = true\n")
         power.announce(p, True, 30)
         msg = self.messages()
-        self.assertIn("auto shutdown: ON", msg)
-        self.assertIn("30s", msg)
-        self.assertIn("shutdown_when_done = false", msg)
+        self.assertIn("自动关机：开", msg)
+        self.assertIn("30 秒", msg)
+        self.assertIn("shutdown_when_done 改回 false", msg)
 
     def test_without_a_config_file(self):
         power.announce(self.root / "nope.toml", False, 60)
-        self.assertIn("no config file", self.messages())
+        self.assertIn("不存在", self.messages())
 
 
 if __name__ == "__main__":

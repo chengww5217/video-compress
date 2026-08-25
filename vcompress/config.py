@@ -174,8 +174,8 @@ def _check_unknown(user: dict, template: dict, path: tuple, errors: list):
             continue
         if path == ("encode",) and isinstance(user[key], dict):
             continue  # 用户自定义的编码器子表
-        errors.append(f"unknown option [{_name(path)}] {key}"
-                      if path else f"unknown section [{key}]")
+        errors.append(f"[{_name(path)}] 里没有 {key} 这个配置项"
+                      if path else f"没有 [{key}] 这个配置节")
 
 
 def _check_table(user: dict, template: dict, path: tuple, errors: list):
@@ -187,109 +187,108 @@ def _check_table(user: dict, template: dict, path: tuple, errors: list):
         here = path + (key,)
         if isinstance(default, dict):
             if not isinstance(value, dict):
-                errors.append(f"[{_name(here)}] must be a table")
+                errors.append(f"[{_name(here)}] 必须是一个配置节（table）")
             elif here in FREEFORM_TABLES:
                 for k, v in value.items():
                     if not _type_ok(v, float):
-                        errors.append(f"[{_name(here)}] {k} must be a number")
+                        errors.append(f"[{_name(here)}] {k} 必须是数字")
             else:
                 _check_table(value, default, here, errors)
             continue
         expected = type(default)
         if not _type_ok(value, expected):
-            errors.append(f"[{_name(path)}] {key} must be "
-                          f"{expected.__name__}, got {type(value).__name__}")
+            errors.append(f"[{_name(path)}] {key} 必须是 "
+                          f"{expected.__name__}，现在是 {type(value).__name__}")
         elif here in RATIO_KEYS and not 0.0 <= float(value) <= 1.0:
-            errors.append(f"[{_name(path)}] {key} must be between 0 and 1")
+            errors.append(f"[{_name(path)}] {key} 必须在 0 和 1 之间")
 
 
 def _check_encoders(cfg: dict, errors: list):
     names = encoder_names(cfg)
     if not names:
-        errors.append("[encode] has no encoder table such as [encode.av1]")
+        errors.append("[encode] 下面一个编码器配置节都没有（比如 [encode.av1]）")
         return
     for name in names:
         table = cfg["encode"][name]
         path = ("encode", name)
         for key in table:
             if key not in ENCODER_KEYS:
-                errors.append(f"unknown option [{_name(path)}] {key}")
+                errors.append(f"[{_name(path)}] 里没有 {key} 这个配置项")
         for key in ENCODER_REQUIRED:
             if key not in table:
-                errors.append(f"[{_name(path)}] is missing {key}")
+                errors.append(f"[{_name(path)}] 缺少必填项 {key}")
         for key, expected in ENCODER_KEYS.items():
             if key in table and not _type_ok(table[key], expected):
-                errors.append(f"[{_name(path)}] {key} has the wrong type")
+                errors.append(f"[{_name(path)}] {key} 的类型不对")
         depth = table.get("min_bit_depth")
         if isinstance(depth, int) and not isinstance(depth, bool) \
                 and not 8 <= depth <= 16:
-            errors.append(f"[{_name(path)}] min_bit_depth must be within "
-                          f"[8, 16] (8 means keep the source depth)")
+            errors.append(f"[{_name(path)}] min_bit_depth 必须在 [8, 16] 之间"
+                          f"（写 8 表示照源片位深编）")
     selected = cfg["encode"].get("encoder")
     if selected not in names:
-        errors.append(f"[encode] encoder = {selected!r} has no matching "
-                      f"[encode.{selected}] table (available: "
-                      f"{', '.join(names)})")
+        errors.append(f"[encode] encoder = {selected!r} 没有对应的 "
+                      f"[encode.{selected}] 配置节（可用的有："
+                      f"{', '.join(names)}）")
 
 
 def _check_semantics(cfg: dict, errors: list):
     ad = cfg["adaptive"]
     if ad["crf_min"] >= ad["crf_max"]:
-        errors.append("[adaptive] crf_min must be smaller than crf_max")
+        errors.append("[adaptive] crf_min 必须小于 crf_max")
     if not 0 < float(ad["target_vmaf"]) <= 100:
-        errors.append("[adaptive] target_vmaf must be within (0, 100]")
+        errors.append("[adaptive] target_vmaf 必须在 (0, 100] 之间")
     if int(ad["sample_seconds"]) <= 0:
-        errors.append("[adaptive] sample_seconds must be positive")
+        errors.append("[adaptive] sample_seconds 必须是正数")
     if int(ad["sample_count"]) < 1:
-        errors.append("[adaptive] sample_count must be at least 1")
+        errors.append("[adaptive] sample_count 至少是 1")
     if float(ad["search_step"]) < 0.25:
-        errors.append("[adaptive] search_step must be at least 0.25 "
-                      "(CRF 的实际可用粒度)")
+        errors.append("[adaptive] search_step 至少是 0.25"
+                      "（CRF 的实际可用粒度）")
 
     vf = cfg["verify"]
     if not 0 < float(vf["vmaf_threshold"]) <= 100:
-        errors.append("[verify] vmaf_threshold must be within (0, 100]")
+        errors.append("[verify] vmaf_threshold 必须在 (0, 100] 之间")
     if not 0 <= float(vf["vmaf_min_segment"]) <= 100:
-        errors.append("[verify] vmaf_min_segment must be within [0, 100] "
-                      "(0 turns the per-segment floor off)")
+        errors.append("[verify] vmaf_min_segment 必须在 [0, 100] 之间"
+                      "（写 0 表示关掉单段下限）")
     if float(vf["vmaf_min_segment"]) > float(vf["vmaf_threshold"]):
-        errors.append("[verify] vmaf_min_segment must not exceed "
-                      "vmaf_threshold; the floor is meant to catch a single "
-                      "bad segment, not to be stricter than the average")
+        errors.append("[verify] vmaf_min_segment 不能高于 vmaf_threshold："
+                      "单段下限是用来抓某一段崩掉的，不该比均值门槛还严")
     if int(vf["vmaf_segments"]) < 1:
-        errors.append("[verify] vmaf_segments must be at least 1")
+        errors.append("[verify] vmaf_segments 至少是 1")
     if float(vf["vmaf_sample_seconds"]) <= 0:
-        errors.append("[verify] vmaf_sample_seconds must be positive")
+        errors.append("[verify] vmaf_sample_seconds 必须是正数")
     if float(vf["max_duration_diff_s"]) < 0:
-        errors.append("[verify] max_duration_diff_s cannot be negative")
+        errors.append("[verify] max_duration_diff_s 不能是负数")
 
     if int(cfg["run"]["workers"]) < 1:
-        errors.append("[run] workers must be at least 1")
+        errors.append("[run] workers 至少是 1")
     if int(cfg["run"]["log_backups"]) < 0:
-        errors.append("[run] log_backups cannot be negative")
+        errors.append("[run] log_backups 不能是负数")
     if int(cfg["run"]["shutdown_delay_seconds"]) < 0:
-        errors.append("[run] shutdown_delay_seconds cannot be negative")
+        errors.append("[run] shutdown_delay_seconds 不能是负数")
 
     ext = cfg["skip"]["extensions"]
     if not ext:
-        errors.append("[skip] extensions is empty; nothing would be processed")
+        errors.append("[skip] extensions 是空的，那样什么文件都不会被处理")
     for e in ext:
         if not isinstance(e, str) or not e.startswith("."):
-            errors.append(f"[skip] extensions entry {e!r} must start with a dot")
+            errors.append(f"[skip] extensions 里的 {e!r} 必须以点开头")
     container = cfg["encode"]["output_container"]
     if not container.startswith("."):
-        errors.append("[encode] output_container must start with a dot")
+        errors.append("[encode] output_container 必须以点开头")
     if not cfg["skip"]["tag_marker"].strip():
-        errors.append("[skip] tag_marker cannot be empty; it is what stops "
-                      "files from being compressed twice")
+        errors.append("[skip] tag_marker 不能为空：它就是防止同一个文件被"
+                      "压第二遍的标记")
 
     audio = cfg["audio"]
     if int(audio["opus_kbps"]) <= 0:
-        errors.append("[audio] opus_kbps must be positive")
+        errors.append("[audio] opus_kbps 必须是正数")
     if int(audio["transcode_over_kbps"]) <= 0:
-        errors.append("[audio] transcode_over_kbps must be positive")
+        errors.append("[audio] transcode_over_kbps 必须是正数")
     if str(audio["lossless"]).lower() not in ("flac", "opus"):
-        errors.append('[audio] lossless must be "flac" or "opus"')
+        errors.append('[audio] lossless 只能是 "flac" 或 "opus"')
 
 
 def validate(cfg: dict) -> dict:
@@ -298,9 +297,9 @@ def validate(cfg: dict) -> dict:
     _check_unknown(cfg, DEFAULTS, (), errors)
     for section, template in DEFAULTS.items():
         if section not in cfg:
-            errors.append(f"missing section [{section}]")
+            errors.append(f"缺少配置节 [{section}]")
         elif not isinstance(cfg[section], dict):
-            errors.append(f"[{section}] must be a table")
+            errors.append(f"[{section}] 必须是一个配置节（table）")
         else:
             _check_table(cfg[section], template, (section,), errors)
     if errors:
@@ -328,19 +327,19 @@ def load(path: Path, required: bool = True) -> dict:
     """读配置文件；required=False 时文件不存在就用内置默认值。"""
     if not path.exists():
         if required:
-            raise ConfigError(f"config file not found: {path}")
+            raise ConfigError(f"配置文件不存在：{path}")
         return normalise({})
     try:
         with open(path, "rb") as f:
             user = tomllib.load(f)
     except tomllib.TOMLDecodeError as e:
-        raise ConfigError(f"{path} is not valid TOML: {e}") from e
+        raise ConfigError(f"{path} 不是合法的 TOML：{e}") from e
     except OSError as e:
-        raise ConfigError(f"cannot read {path}: {e}") from e
+        raise ConfigError(f"读不了 {path}：{e}") from e
     try:
         return normalise(user)
     except ConfigError as e:
-        raise ConfigError(f"{path} is not a usable config:\n{e}") from e
+        raise ConfigError(f"{path} 里的配置有问题：\n{e}") from e
 
 
 def resolve_run_path(base: Path, value: str) -> Path:

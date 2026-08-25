@@ -87,6 +87,7 @@ video-compress/
 │   ├── progress.py      # 单行进度渲染
 │   ├── proc.py          # 子进程注册表与取消（Ctrl+C 时统一杀干净）
 │   ├── power.py         # 完成后自动关机（结束时重读配置、写回 false）
+│   ├── logfmt.py        # 控制台上色与重点高亮、文件日志的会话分隔
 │   └── util.py          # 类型宽松转换与格式化
 └── tests/               # 测试（unittest），一个模块一份
     ├── helpers.py           # 配置与 VideoInfo 替身
@@ -102,6 +103,8 @@ video-compress/
     ├── test_results.py      # 记录存储与缓存新鲜度
     ├── test_pipeline.py     # 流程编排：中断/失败清理、落地行为
     ├── test_cli.py          # 参数解析、自检、日志轮转、调度选择
+    ├── test_logfmt.py       # 上色、重点高亮、会话分隔线
+    ├── test_power.py        # 关机开关的重读、写回与平台命令
     └── test_integration.py  # 真实 ffmpeg 端到端（缺 ffmpeg 自动跳过）
 ```
 

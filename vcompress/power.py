@@ -18,6 +18,8 @@ import time
 import tomllib
 from pathlib import Path
 
+from .logfmt import em
+
 log = logging.getLogger("vcompress")
 
 CONFIG_KEY = "shutdown_when_done"
@@ -30,20 +32,17 @@ _SECTION = re.compile(r"^\s*\[([^\[\]]+)\]\s*(?:#.*)?$")
 def announce(cfg_path: Path, enabled: bool, delay: int) -> None:
     """任务开始时把关机设置打到控制台，顺带告诉用户怎么改。"""
     if not cfg_path.exists():
-        log.info(f"auto shutdown: OFF (no config file at {cfg_path}; "
-                 f"create one with [run] {CONFIG_KEY} = true to power off "
-                 f"when everything is done)")
+        log.info(f"自动关机：{em('关')}（{cfg_path} 不存在；建一个并写上 "
+                 f"[run] {CONFIG_KEY} = true 就能在全部任务结束后关机）")
         return
     if enabled:
-        log.info(f"auto shutdown: ON — the machine powers off {delay}s after "
-                 f"all tasks finish; the flag is read again at the end, so "
-                 f"setting [run] {CONFIG_KEY} = false in {cfg_path} while the "
-                 f"run is in progress still cancels it")
+        log.info(f"自动关机：{em('开')} —— 全部任务结束 {delay} 秒后关机。"
+                 f"这个开关在结束时会重新读一遍，所以现在改主意也来得及："
+                 f"把 {cfg_path} 里的 [run] {CONFIG_KEY} 改回 false 即可")
     else:
-        log.info(f"auto shutdown: OFF — set [run] {CONFIG_KEY} = true in "
-                 f"{cfg_path} to power off {delay}s after all tasks finish; "
-                 f"you can flip it while the run is in progress (it is read "
-                 f"again at the end, and reset to false before shutting down)")
+        log.info(f"自动关机：{em('关')} —— 想跑完就关机，把 {cfg_path} 里的 "
+                 f"[run] {CONFIG_KEY} 改成 true（压缩过程中改也生效，结束时"
+                 f"才读；关机前会自动写回 false）")
 
 
 def read_flag(cfg_path: Path) -> bool:
@@ -53,26 +52,25 @@ def read_flag(cfg_path: Path) -> bool:
     某个无关的笔误而崩掉没有意义。文件坏了/读不了就当没开。
     """
     if not cfg_path.exists():
-        log.debug(f"no config file at {cfg_path}; auto shutdown stays off")
+        log.debug(f"{cfg_path} 不存在，不自动关机")
         return False
     try:
         with open(cfg_path, "rb") as f:
             data = tomllib.load(f)
     except (OSError, tomllib.TOMLDecodeError) as e:
-        log.warning(f"cannot re-read {cfg_path} ({e}); skipping auto shutdown")
+        log.warning(f"重读 {cfg_path} 失败（{e}），不自动关机")
         return False
     run = data.get("run")
     value = run.get(CONFIG_KEY) if isinstance(run, dict) else None
     if value is None:
-        log.debug(f"[run] {CONFIG_KEY} is not set in {cfg_path}; "
-                  f"auto shutdown stays off")
+        log.debug(f"{cfg_path} 里没写 [run] {CONFIG_KEY}，不自动关机")
         return False
     if not isinstance(value, bool):
-        log.warning(f"[run] {CONFIG_KEY} in {cfg_path} is {value!r}, not a "
-                    f"boolean; skipping auto shutdown")
+        log.warning(f"{cfg_path} 里 [run] {CONFIG_KEY} = {value!r} 不是布尔值，"
+                    f"不自动关机")
         return False
-    log.info(f"re-read {cfg_path}: [run] {CONFIG_KEY} = "
-             f"{'true' if value else 'false'}")
+    log.info(f"重读配置 {cfg_path}：[run] {CONFIG_KEY} = "
+             f"{em('true' if value else 'false')}")
     return value
 
 
@@ -85,7 +83,7 @@ def disarm(cfg_path: Path) -> bool:
     try:
         text = cfg_path.read_text(encoding="utf-8")
     except OSError as e:
-        log.error(f"cannot read {cfg_path} to reset [run] {CONFIG_KEY} ({e})")
+        log.error(f"要把 [run] {CONFIG_KEY} 改回 false，但读不了 {cfg_path}（{e}）")
         return False
 
     lines = text.splitlines(keepends=True)
@@ -104,8 +102,8 @@ def disarm(cfg_path: Path) -> bool:
             lines[i] = f"{m.group(1)}false{m.group(3)}{newline}"
             hit = i
     if hit is None:
-        log.error(f"cannot find [run] {CONFIG_KEY} in {cfg_path}; "
-                  f"skipping auto shutdown so it cannot repeat")
+        log.error(f"在 {cfg_path} 里找不到 [run] {CONFIG_KEY} 那一行，"
+                  f"改不回 false，为免下次运行又关机，本次放弃关机")
         return False
 
     tmp = cfg_path.with_name(cfg_path.name + ".tmp")
@@ -113,11 +111,11 @@ def disarm(cfg_path: Path) -> bool:
         tmp.write_text("".join(lines), encoding="utf-8")
         tmp.replace(cfg_path)
     except OSError as e:
-        log.error(f"cannot write {cfg_path} to reset [run] {CONFIG_KEY} ({e})")
+        log.error(f"把 [run] {CONFIG_KEY} 写回 false 时失败（{e}），本次放弃关机")
         tmp.unlink(missing_ok=True)
         return False
-    log.info(f"reset [run] {CONFIG_KEY} = false in {cfg_path}; the next run "
-             f"will not power off unless you turn it on again")
+    log.info(f"已把 {cfg_path} 里的 [run] {CONFIG_KEY} 写回 false，"
+             f"下次要关机得再手动打开")
     return True
 
 
@@ -134,7 +132,7 @@ def shutdown_command() -> list | None:
         if shutil.which("systemctl"):
             return ["systemctl", "poweroff"]
         return ["shutdown", "-h", "now"]
-    log.error(f"no shutdown command known for {system!r}")
+    log.error(f"不知道 {system!r} 平台该用什么关机命令，本次放弃关机")
     return None
 
 
@@ -142,7 +140,7 @@ def _countdown(delay: int) -> bool:
     """倒计时；被 Ctrl+C 打断返回 False（取消关机）。"""
     if delay <= 0:
         return True
-    log.info(f"shutting down in {delay}s — press Ctrl+C to cancel")
+    log.warning(f"{em(f'{delay} 秒后关机')} —— 按 Ctrl+C 可取消")
     left = delay
     try:
         while left > 0:
@@ -150,9 +148,9 @@ def _countdown(delay: int) -> bool:
             time.sleep(step)
             left -= step
             if left:
-                log.info(f"shutting down in {left}s")
+                log.warning(f"{em(f'{left} 秒后关机')}")
     except KeyboardInterrupt:
-        log.warning("auto shutdown cancelled")
+        log.warning("已取消自动关机")
         return False
     return True
 
@@ -164,7 +162,7 @@ def maybe_shutdown(cfg_path: Path, delay: int, runner=None) -> bool:
     失败就不关机。
     """
     if not read_flag(cfg_path):
-        log.info("auto shutdown is off; leaving the machine running")
+        log.info("自动关机没开，机器保持运行")
         return False
     if not disarm(cfg_path):
         return False
@@ -175,17 +173,17 @@ def maybe_shutdown(cfg_path: Path, delay: int, runner=None) -> bool:
         return False
 
     from . import proc
-    log.info("running: " + " ".join(cmd))
+    log.info("执行关机命令：" + em(" ".join(cmd)))
     run = runner or proc.run_managed
     try:
         code, out, err = run(cmd)
     except OSError as e:
-        log.error(f"shutdown command failed to start: {e}")
+        log.error(f"关机命令起不来：{e}")
         return False
     if code != 0:
         detail = (err or out or "").strip()
-        log.error(f"shutdown command exited with {code}"
-                  + (f": {detail}" if detail else ""))
+        log.error(f"关机命令返回 {code}"
+                  + (f"：{detail}" if detail else ""))
         return False
-    log.info("shutdown command accepted; goodbye")
+    log.info("关机命令已被系统接受，再见")
     return True

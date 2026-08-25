@@ -5,6 +5,7 @@
 
 import sys
 
+from . import logfmt
 from .util import fmt_hms
 
 NAME_WIDTH = 36
@@ -20,18 +21,24 @@ class ProgressPrinter:
         self.name = name[:NAME_WIDTH]
         self.enabled = enabled
         self.stream = stream if stream is not None else sys.stdout
+        self.color = enabled and logfmt.supports_color(self.stream)
         self._open = False
+
+    def _pct(self, pct: float) -> str:
+        text = f"{pct:5.1f}%"
+        return f"{logfmt.BOLD}{logfmt.CYAN}{text}{logfmt.RESET}" \
+            if self.color else text
 
     def __call__(self, pct, info_val=0.0, speed=0.0):
         """run_encode 的 progress_cb：pct=None 表示总时长未知，info_val 是已处理秒数。"""
         if not self.enabled:
             return
         if pct is None:
-            text = f"\r  {fmt_hms(info_val)} processed   {self.name:<{NAME_WIDTH}}"
+            text = f"\r  已处理 {fmt_hms(info_val)}   {self.name:<{NAME_WIDTH}}"
         else:
             spd = f"x{speed:.1f}" if speed > 0 else "        "
-            eta = f"eta {fmt_hms(info_val):>7}" if info_val else "eta       --"
-            text = (f"\r  {pct:5.1f}%  {eta}  {spd:>7}  "
+            eta = f"剩余 {fmt_hms(info_val):>7}" if info_val else "剩余      --"
+            text = (f"\r  {self._pct(pct)}  {eta}  {spd:>7}  "
                     f"{self.name:<{NAME_WIDTH}}")
         self.stream.write(text)
         self.stream.flush()

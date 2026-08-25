@@ -104,7 +104,7 @@ class ShouldSkipTests(unittest.TestCase):
     def test_tagged_file_skips(self):
         skip, reason = should_skip(make_info(comment="vcompress-v1"), self.cfg)
         self.assertTrue(skip)
-        self.assertIn("processed", reason)
+        self.assertIn("之前压过了", reason)
 
     def test_marker_match_is_case_insensitive(self):
         skip, _ = should_skip(make_info(comment="Encoded by VCompress-v1"),
@@ -129,7 +129,7 @@ class ShouldSkipTests(unittest.TestCase):
     def test_small_file_skips(self):
         skip, reason = should_skip(make_info(size=1024), self.cfg)
         self.assertTrue(skip)
-        self.assertIn("small", reason)
+        self.assertIn("文件太小", reason)
 
     def test_bpp_below_threshold_skips(self):
         info = make_info(bitrate=3_000_000)
@@ -137,7 +137,7 @@ class ShouldSkipTests(unittest.TestCase):
         self.assertLess(bpp, 0.05)
         skip, reason = should_skip(info, self.cfg)
         self.assertTrue(skip)
-        self.assertIn("threshold", reason)
+        self.assertIn("低于阈值", reason)
 
     def test_healthy_h264_not_skipped(self):
         skip, reason = should_skip(make_info(), self.cfg)
@@ -152,7 +152,7 @@ class ShouldSkipTests(unittest.TestCase):
         info = make_info(video_codec="av01", codec_family="av1", bitrate=20_000_000)
         skip, reason = should_skip(info, self.cfg)
         self.assertTrue(skip)
-        self.assertIn("saving", reason)
+        self.assertIn("预估只能省", reason)
 
     def test_unknown_codec_not_skipped(self):
         info = make_info(video_codec="prores", codec_family="", bitrate=100_000_000)
@@ -170,7 +170,7 @@ class ShouldSkipTests(unittest.TestCase):
                          audio_codecs=["truehd"], audio_bitrates=[1_500_000])
         skip, reason = should_skip(info, self.cfg)
         self.assertTrue(skip, "bpp gate must judge the video track alone")
-        self.assertIn("bits/pixel", reason)
+        self.assertIn("每像素码率", reason)
 
 
 class InterlacedTests(unittest.TestCase):
@@ -183,7 +183,7 @@ class InterlacedTests(unittest.TestCase):
         for order in ("tt", "bb", "tb", "bt"):
             skip, reason = should_skip(make_info(field_order=order), self.cfg)
             self.assertTrue(skip, order)
-            self.assertIn("interlaced", reason)
+            self.assertIn("交错源", reason)
             self.assertIn(order, reason)
 
     def test_progressive_source_is_processed(self):
@@ -200,7 +200,7 @@ class InterlacedTests(unittest.TestCase):
         """交错的判断不该被别的跳过原因掩盖，它的理由信息量最大。"""
         info = make_info(field_order="tt", bitrate=1_000)
         _skip, reason = should_skip(info, self.cfg)
-        self.assertIn("interlaced", reason)
+        self.assertIn("交错源", reason)
 
     def test_interlaced_property(self):
         self.assertTrue(make_info(field_order="bt").interlaced)

@@ -160,7 +160,7 @@ class PixFmtTests(unittest.TestCase):
         cfg = caps.with_pix_fmt(make_cfg()["encode"]["av1"], "rgb24",
                                   {"gray"}, _FakeLog(warnings))
         self.assertNotIn("pix_fmt", cfg)
-        self.assertIn("may fail", warnings[0])
+        self.assertIn("可能会失败", warnings[0])
 
 class _FakeLog:
     def __init__(self, sink):

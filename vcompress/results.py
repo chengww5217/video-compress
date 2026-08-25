@@ -7,9 +7,24 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .logfmt import em
+
 log = logging.getLogger("vcompress")
 
 CACHED_ACTIONS = ("ok", "skipped")
+
+# records 里的 action 是给机器看的，日志里要给人看
+ACTION_LABELS = {
+    "ok": "已压缩",
+    "skipped": "已跳过",
+    "failed": "失败",
+    "dryrun": "预览",
+    "aborted": "中止",
+}
+
+
+def action_label(action: str) -> str:
+    return ACTION_LABELS.get(action, action)
 
 # 只有攒够这么多行、且其中一半以上是被后来记录顶掉的旧行，才值得压实。
 # 一次处理一万个文件是正常的（那一万行都还有效），反复 --force 重跑才会
@@ -61,14 +76,14 @@ class ResultStore:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
             os.replace(tmp, self.path)
         except OSError as e:
-            log.warning(f"cannot compact {self.path.name}: {e}")
+            log.warning(f"压实 {self.path.name} 失败：{e}")
             try:
                 tmp.unlink(missing_ok=True)
             except OSError:
                 pass
             return
-        log.info(f"compacted {self.path.name}: {before} -> "
-                 f"{len(self.history)} record(s)")
+        log.debug(f"压实 {self.path.name}：{before} 行 -> "
+                  f"{len(self.history)} 条记录")
 
     def last(self, path: Path):
         return self.history.get(str(path.resolve()))
@@ -110,8 +125,8 @@ class ResultStore:
             return rec
         if actual in expected:
             return rec
-        log.info(f"[recheck] {path.name}: size changed since the last run "
-                 f"({sorted(expected)[0]} -> {actual} bytes); processing again")
+        log.info(f"[重查] {em(path.name)}：体积和上次记录不一致"
+                 f"（{sorted(expected)[0]} -> {actual} 字节），重新处理")
         return None
 
     @staticmethod

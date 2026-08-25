@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import encode, proc, vmaf
+from .logfmt import em
 from .util import to_float, to_int
 
 
@@ -65,8 +66,8 @@ def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
             sample.unlink(missing_ok=True)
         total_bytes += size
         measured += 1
-        log.debug(f"adaptive probe: crf={encode.fmt_crf(crf)} segment "
-                  f"{i + 1}/{len(refs)} vmaf={score:.2f} {size} bytes")
+        log.debug(f"[搜索] crf={encode.fmt_crf(crf)} 第 {i + 1}/{len(refs)} 段："
+                  f"VMAF {score:.2f}，{size} 字节")
         worst = score if worst is None else min(worst, score)
         if worst < target:
             break
@@ -105,8 +106,8 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
     starts = vmaf.sample_starts(duration, seconds, count)
     span = min(seconds, duration) if duration > 0 else seconds
     best = None
-    log.info(f"adaptive search: extracting {len(starts)} reference segment(s) "
-             f"of {seconds:.0f}s from {src.name}")
+    log.info(f"[搜索] {em(src.name)}：抽 {len(starts)} 段 × {seconds:.0f}s "
+             f"作为参考样本")
     tmpdir = tempfile.TemporaryDirectory(prefix="vcadapt_")
     try:
         root = Path(tmpdir.name)
@@ -121,8 +122,8 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
             mid = search_midpoint(lo, hi, step)
             score, sample_bytes, measured = _probe_crf(
                 tools, refs, mid, enc_cfg, root, target, model, log)
-            log.info(f"adaptive probe: crf={encode.fmt_crf(mid)} worst-segment "
-                     f"vmaf={score:.2f} (target {target})")
+            log.info(f"[搜索] crf={em(encode.fmt_crf(mid))}：最差段 VMAF "
+                     f"{em(f'{score:.2f}')}（目标 {target}）")
             if score >= target:
                 best = CrfChoice(mid, _sample_bitrate(sample_bytes, span,
                                                       measured), True, score)
@@ -134,18 +135,18 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
                 tools, refs, lo, enc_cfg, root, target, model, log)
             if score < target:
                 log.warning(
-                    f"even crf={encode.fmt_crf(lo)} only reaches "
-                    f"vmaf={score:.2f} < {target}"
+                    f"连 crf={encode.fmt_crf(lo)} 都只有 VMAF "
+                    f"{score:.2f}，达不到目标 {target}"
                 )
             best = CrfChoice(lo, _sample_bitrate(sample_bytes, span, measured),
                              score >= target, score)
-        log.info(f"adaptive crf selected: {encode.fmt_crf(best.crf)} (target "
-                 f"vmaf {target}, worst of {len(refs)} segment(s) "
-                 f"{best.worst_vmaf:.2f}, sampled "
-                 f"{best.video_bitrate // 1000} kbps)")
+        log.info(f"[搜索] 定为 crf={em(encode.fmt_crf(best.crf))}"
+                 f"（目标 VMAF {target}，{len(refs)} 段里最差 "
+                 f"{best.worst_vmaf:.2f}，样本码率 "
+                 f"{best.video_bitrate // 1000} kbps）")
         return best
     except (encode.EncodeError, vmaf.VmafError, OSError) as e:
-        log.warning(f"adaptive crf search failed ({e}); falling back to default")
+        log.warning(f"自适应 CRF 搜索失败（{e}），回退到配置里的固定 CRF")
         return None
     finally:
         tmpdir.cleanup()

@@ -116,45 +116,45 @@ class ValidationTests(unittest.TestCase):
 
     def test_typo_in_option_name_is_rejected(self):
         self.assert_rejected({"skip": {"min_saving_ration": 0.2}},
-                             "unknown option", "min_saving_ration")
+                             "这个配置项", "min_saving_ration")
 
     def test_unknown_section_is_rejected(self):
-        self.assert_rejected({"encoding": {}}, "unknown section", "encoding")
+        self.assert_rejected({"encoding": {}}, "这个配置节", "encoding")
 
     def test_wrong_type_is_rejected(self):
         self.assert_rejected({"run": {"workers": "many"}}, "workers", "int")
 
     def test_selected_encoder_must_have_a_table(self):
         self.assert_rejected({"encode": {"encoder": "vp9"}},
-                             "[encode.vp9]", "available")
+                             "[encode.vp9]", "可用的有")
 
     def test_encoder_table_needs_a_codec(self):
         self.assert_rejected(
             {"encode": {"encoder": "raw", "raw": {"preset": "1", "crf": 0}}},
-            "[encode.raw] is missing codec")
+            "[encode.raw] 缺少必填项 codec")
 
     def test_unknown_key_inside_encoder_table_is_rejected(self):
         self.assert_rejected(
             {"encode": {"av1": {"pixel_format": "yuv420p"}}},
-            "unknown option", "pixel_format")
+            "这个配置项", "pixel_format")
 
     def test_ratio_out_of_range_is_rejected(self):
         self.assert_rejected({"skip": {"min_saving_ratio": 1.5}},
-                             "between 0 and 1")
+                             "必须在 0 和 1 之间")
 
     def test_crf_bounds_must_be_ordered(self):
         self.assert_rejected({"adaptive": {"crf_min": 40, "crf_max": 20}},
-                             "crf_min must be smaller")
+                             "crf_min 必须小于 crf_max")
 
     def test_empty_tag_marker_is_rejected(self):
         self.assert_rejected({"skip": {"tag_marker": "  "}}, "tag_marker")
 
     def test_extension_without_dot_is_rejected(self):
         self.assert_rejected({"skip": {"extensions": ["mp4"]}},
-                             "must start with a dot")
+                             "必须以点开头")
 
     def test_zero_workers_is_rejected(self):
-        self.assert_rejected({"run": {"workers": 0}}, "at least 1")
+        self.assert_rejected({"run": {"workers": 0}}, "至少是 1")
 
     def test_out_of_range_vmaf_threshold_is_rejected(self):
         self.assert_rejected({"verify": {"vmaf_threshold": 120.0}},
@@ -162,7 +162,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_bpp_table_values_must_be_numbers(self):
         self.assert_rejected({"skip": {"bpp": {"h264": "low"}}},
-                             "must be a number")
+                             "必须是数字")
 
     def test_integers_are_accepted_where_floats_are_expected(self):
         cfg = config.normalise({"adaptive": {"target_vmaf": 95}})
@@ -187,7 +187,7 @@ class LoadTests(unittest.TestCase):
     def test_missing_required_file_raises(self):
         with self.assertRaises(config.ConfigError) as cm:
             config.load(self.root / "nope.toml", required=True)
-        self.assertIn("not found", str(cm.exception))
+        self.assertIn("不存在", str(cm.exception))
 
     def test_missing_optional_file_falls_back_to_defaults(self):
         cfg = config.load(self.root / "nope.toml", required=False)

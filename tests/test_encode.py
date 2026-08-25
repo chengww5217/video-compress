@@ -231,7 +231,7 @@ class RunEncodeStderrTests(unittest.TestCase):
         res = self.run_in_thread([sys.executable, "-u", "-c", script])
         err = res.get("err")
         self.assertIsInstance(err, encode.EncodeError)
-        self.assertIn("exited 3", str(err))
+        self.assertIn("退出码 3", str(err))
         self.assertIn("boom", str(err))
 
 class MergeCommentTests(unittest.TestCase):

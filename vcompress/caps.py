@@ -10,6 +10,7 @@ import threading
 from dataclasses import dataclass
 
 from . import proc
+from .logfmt import em
 from .util import to_int
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]*")
@@ -200,18 +201,18 @@ def with_pix_fmt(encoder_cfg: dict, src_pix_fmt: str, supported,
     if chosen:
         cfg["pix_fmt"] = chosen
         if log:
-            log.warning(f"{cfg['codec']} does not accept {src_pix_fmt}; "
-                        f"converting to {chosen}")
+            log.warning(f"{cfg['codec']} 不接受 {src_pix_fmt}，转成 "
+                        f"{em(chosen)}")
     elif supported and src_pix_fmt and src_pix_fmt not in supported:
         if log:
-            log.warning(f"{cfg['codec']} does not accept {src_pix_fmt} and no "
-                        f"close substitute is available; the encode may fail")
+            log.warning(f"{cfg['codec']} 不接受 {src_pix_fmt}，又找不到相近的"
+                        f"替代格式，编码可能会失败")
     current = cfg.get("pix_fmt") or src_pix_fmt
     bumped = bumped_pix_fmt(current, supported,
                             to_int(cfg.get("min_bit_depth"), 10))
     if bumped:
         cfg["pix_fmt"] = bumped
         if log:
-            log.info(f"encoding {current} source as {bumped} "
-                     f"(higher internal precision, less banding)")
+            log.info(f"{current} 的源按 {em(bumped)} 编码"
+                     f"（内部精度更高，更不容易 banding）")
     return cfg

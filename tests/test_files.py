@@ -170,7 +170,7 @@ class ResolveFinalPathTests(unittest.TestCase):
         with self.assertRaises(RuntimeError) as cm:
             resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
                                keep=False)
-        self.assertIn("already exists", str(cm.exception))
+        self.assertIn("已被占用", str(cm.exception))
 
     def test_reserved_target_is_treated_as_taken(self):
         """磁盘上还不存在但已被别的文件预定的名字同样不能用。"""

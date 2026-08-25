@@ -69,8 +69,7 @@ def _find_tool(config_value: str, name: str) -> str:
         if r:
             return r
         raise FileNotFoundError(
-            f"config.toml [tools] points at {config_value!r}, but no {name} "
-            f"was found there"
+            f"config.toml [tools] 指定了 {config_value!r}，但那里找不到 {name}"
         )
     w = shutil.which(name)
     if w:
@@ -80,7 +79,7 @@ def _find_tool(config_value: str, name: str) -> str:
         if r:
             return r
     raise FileNotFoundError(
-        f"{name} not found. Install ffmpeg or set path in config.toml [tools]"
+        f"找不到 {name}：请安装 ffmpeg，或在 config.toml [tools] 里指定路径"
     )
 
 
@@ -189,12 +188,11 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     # 走 run_managed：Ctrl+C 时这个 ffprobe 也要被杀掉，别留孤儿进程
     rc, out, err = proc.run_managed(cmd)
     if rc != 0:
-        raise RuntimeError(f"ffprobe failed for {path.name}: {err.strip()[:300]}")
+        raise RuntimeError(f"ffprobe 读不了 {path.name}：{err.strip()[:300]}")
     try:
         data = json.loads(out)
     except ValueError as e:
-        raise RuntimeError(f"ffprobe returned unparsable JSON for "
-                           f"{path.name}: {e}") from e
+        raise RuntimeError(f"ffprobe 对 {path.name} 返回的 JSON 解析不了：{e}") from e
     fmt = data.get("format", {})
     streams = data.get("streams", [])
     vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
@@ -242,7 +240,7 @@ def _file_size(path: Path) -> int:
 def should_skip(info: VideoInfo, cfg: dict):
     marker = str(cfg["skip"].get("tag_marker", "vcompress"))
     if marker and marker.lower() in (info.comment or "").lower():
-        return True, f"already processed by {marker}"
+        return True, f"元数据里已有 {marker} 标记，之前压过了"
 
     # 交错源：像素能原样压过去，但容器的交错标记压根传不过去（AV1 没有交错
     # 信号），播放器从此不再反交错，梳齿就留在画面上了。这是 VMAF 测不出来的
@@ -250,13 +248,13 @@ def should_skip(info: VideoInfo, cfg: dict):
     # 反交错属于「动画面」，不在本工具范围内，唯一正确的处置就是不碰。
     if cfg["skip"].get("skip_interlaced", True) and info.interlaced:
         return True, (
-            f"interlaced source (field_order={info.field_order}); compressing "
-            f"it would drop the interlace flag and disable deinterlacing"
+            f"交错源（field_order={info.field_order}）：压过去会丢掉交错标记，"
+            f"播放器不再反交错"
         )
 
     min_size = int(cfg["skip"].get("min_size_mb", 0)) * 1024 * 1024
     if info.size and info.size < min_size:
-        return True, f"file too small ({info.size // 1024 // 1024} MB)"
+        return True, f"文件太小（{info.size // 1024 // 1024} MB）"
 
     bpp_cfg = cfg["skip"]["bpp"]
     if info.codec_family and info.codec_family in bpp_cfg:
@@ -268,8 +266,8 @@ def should_skip(info: VideoInfo, cfg: dict):
             thr = float(bpp_cfg[info.codec_family])
             if bpp < thr:
                 return True, (
-                    f"{info.codec_family} at {bpp:.4f} bits/pixel "
-                    f"is already below threshold {thr}"
+                    f"{info.codec_family} 每像素码率 {bpp:.4f} bits，"
+                    f"已经低于阈值 {thr}，视为压到位了"
                 )
 
     ratio_cfg = cfg["skip"]["expected_ratio"]
@@ -279,7 +277,7 @@ def should_skip(info: VideoInfo, cfg: dict):
         saving = 1.0 - predicted
         if saving < min_saving:
             return True, (
-                f"{info.codec_family} predicted saving {saving:.0%} "
-                f"below required {min_saving:.0%}"
+                f"{info.codec_family} 预估只能省 {saving:.0%}，"
+                f"低于要求的 {min_saving:.0%}"
             )
     return False, ""

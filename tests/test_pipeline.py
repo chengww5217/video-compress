@@ -210,7 +210,7 @@ class SkipAndDryRunTests(PipelineTestCase):
         with mock.patch.object(pipeline.probe, "probe", return_value=self.info):
             outcome = pipeline.process_file(ctx, self.src)
         self.assertEqual(outcome, pipeline.SKIPPED)
-        self.assertIn("already processed", self.store.last(self.src)["reason"])
+        self.assertIn("之前压过了", self.store.last(self.src)["reason"])
 
     def test_dry_run_touches_nothing(self):
         ctx = self.ctx(dry_run=True)
@@ -247,7 +247,7 @@ class PreEncodeRejectTests(PipelineTestCase):
         self.assertTrue(self.src.exists(), "original must be untouched")
         self.assertFalse((self.root / "a.mkv").exists())
         self.assertFalse(self.tmp_file().exists())
-        self.assertIn("below required", self.store.last(self.src)["reason"])
+        self.assertIn("低于要求的", self.store.last(self.src)["reason"])
 
     def test_good_prediction_proceeds(self):
         # 400 bps -> 500 字节，省 50%
@@ -260,7 +260,7 @@ class PreEncodeRejectTests(PipelineTestCase):
             adaptive.CrfChoice(16, 100, False, 88.0))
         self.assertEqual(outcome, pipeline.SKIPPED)
         self.assertTrue(self.src.exists())
-        self.assertIn("below target", self.store.last(self.src)["reason"])
+        self.assertIn("低于目标", self.store.last(self.src)["reason"])
 
     def test_unreachable_target_can_be_allowed(self):
         self.cfg["adaptive"]["require_target"] = False

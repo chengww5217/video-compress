@@ -173,9 +173,9 @@ class IntegrationTests(unittest.TestCase):
     def test_a_compress_replaces_and_keeps_bad_file(self):
         r = self.run_vcompress("--no-adaptive", "--delete-original")
         self.assertEqual(r.returncode, 1)
-        self.assertIn("[ok] src.mp4", r.stdout)
-        self.assertIn("[encode] src.mp4", r.stdout)
-        self.assertIn("[fail] garbage.mp4", r.stdout)
+        self.assertIn("[完成] src.mp4", r.stdout)
+        self.assertIn("[编码] src.mp4", r.stdout)
+        self.assertIn("[失败] garbage.mp4", r.stdout)
         self.assertFalse((self.root / "src.mp4").exists(),
                          "original should be deleted after success")
         out = self.root / "src.mkv"
@@ -208,15 +208,15 @@ class IntegrationTests(unittest.TestCase):
 
     def test_b_rerun_skips_via_tag_even_with_force(self):
         r = self.run_vcompress("--force", videos=("src.mkv", "garbage.mp4"))
-        self.assertIn("[skip] src.mkv", r.stdout)
-        self.assertIn("already processed", r.stdout)
+        self.assertIn("[跳过] src.mkv", r.stdout)
+        self.assertIn("之前压过了", r.stdout)
 
     def test_c_keep_flag_preserves_originals(self):
         r = self.run_vcompress("--no-adaptive", "--keep",
                                videos=("keep_src.mp4",))
         self.assertEqual(r.returncode, 0)
-        self.assertIn("[ok] keep_src.mp4", r.stdout)
-        self.assertIn("original kept", r.stdout)
+        self.assertIn("[完成] keep_src.mp4", r.stdout)
+        self.assertIn("原文件保留", r.stdout)
         self.assertTrue((self.root / "keep_src.mp4").exists(),
                         "original must survive in keep mode")
         self.assertTrue((self.root / "keep_src.mkv").exists())
@@ -248,8 +248,8 @@ class IntegrationTests(unittest.TestCase):
         r = self.run_vcompress("--no-adaptive", "--keep", "--force",
                                videos=("same_ext.mkv",))
         self.assertEqual(r.returncode, 1)
-        self.assertIn("[fail] same_ext.mkv", r.stdout)
-        self.assertIn("already exists", r.stdout)
+        self.assertIn("[失败] same_ext.mkv", r.stdout)
+        self.assertIn("已被占用", r.stdout)
         prev = self.root / "same_ext.av1.mkv"
         self.assertTrue(prev.exists(), "previous output must not be touched")
         self.assertEqual(prev.stat().st_size, IntegrationTests.prev_output_size,
@@ -266,8 +266,8 @@ class IntegrationTests(unittest.TestCase):
         r = self.run_vcompress("--no-adaptive", "--delete-original",
                                videos=("collide.mp4",))
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("[ok] collide.mp4", r.stdout)
-        self.assertIn("writing to collide.av1.mkv instead", r.stdout)
+        self.assertIn("[完成] collide.mp4", r.stdout)
+        self.assertIn("改写到 collide.av1.mkv", r.stdout)
 
         self.assertTrue(victim.exists(), "unrelated file must survive")
         self.assertEqual(victim.stat().st_size, before_size)
@@ -290,7 +290,7 @@ class IntegrationTests(unittest.TestCase):
     def test_h_data_stream_and_mov_text_survive_the_container_switch(self):
         r = self.run_vcompress("--no-adaptive", videos=("tricky.mp4",))
         self.assertEqual(r.returncode, 0, r.stdout)
-        self.assertIn("[ok] tricky.mp4", r.stdout)
+        self.assertIn("[完成] tricky.mp4", r.stdout)
         out = self.root / "tricky.mkv"
         self.assertTrue(out.exists())
 
@@ -344,8 +344,8 @@ class IntegrationTests(unittest.TestCase):
                       self.ffprobe_field(out, "format_tags=COMMENT"))
 
         second = run("marker.mkv")
-        self.assertIn("[skip] marker.mkv", second.stdout)
-        self.assertIn("already processed by zzmark", second.stdout)
+        self.assertIn("[跳过] marker.mkv", second.stdout)
+        self.assertIn("已有 zzmark 标记", second.stdout)
 
     def test_j_relative_run_paths_follow_the_config_file(self):
         box = self.root / "box"
@@ -540,7 +540,7 @@ class IntegrationTests(unittest.TestCase):
         )
         self.assertEqual(r.returncode, 1, r.stdout)
         self.assertIn("libdefinitelynope", r.stdout)
-        self.assertNotIn("[encode]", r.stdout, "must not start encoding")
+        self.assertNotIn("[编码]", r.stdout, "must not start encoding")
         self.assertTrue(src.exists())
         self.assertFalse((self.root / "badcodec.mkv").exists())
 
@@ -591,7 +591,7 @@ class IntegrationTests(unittest.TestCase):
                 proc.communicate()
 
         self.assertEqual(proc.returncode, 130, out)
-        self.assertIn("interrupted", out)
+        self.assertIn("已中断", out)
         self.assertEqual(list(self.root.glob("slow*.tmp.mkv")), [],
                          "partial temp files must be removed on interrupt")
         for n in names:
@@ -714,7 +714,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertTrue(out.exists(), r.stdout)
         # 4:2:2 归一化到 4:2:0，同时 8-bit 提到 10-bit 编码
         self.assertEqual(self.pix_fmt(out), "yuv420p10le", r.stdout)
-        self.assertIn("does not accept yuv422p", r.stdout)
+        self.assertIn("不接受 yuv422p", r.stdout)
 
     def test_s_original_comment_is_kept_alongside_the_marker(self):
         box = Path(tempfile.mkdtemp(prefix="vc_comment_", dir=self.root))

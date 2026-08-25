@@ -13,6 +13,7 @@ from pathlib import Path
 
 from . import adaptive, caps, encode, files, probe, proc, tracks, verify
 from .caps import Caps
+from .logfmt import em
 from .progress import ProgressPrinter
 from .results import ResultStore
 from .util import fmt_size, to_float
@@ -92,21 +93,21 @@ def process_file(ctx: RunContext, src: Path) -> str:
     try:
         info = probe.probe(ctx.tools, src)
     except Exception as e:
-        log.error(f"[fail] {src.name}: probe error: {e}")
+        log.error(f"[失败] {em(src.name)}：探测失败：{e}")
         ctx.store.add("failed", None, path=str(src.resolve()), stage="probe",
                       error=str(e)[:500])
         return ctx.stats.record(FAILED)
 
     skip, reason = probe.should_skip(info, ctx.cfg)
     if skip:
-        log.info(f"[skip] {src.name}: {reason}")
+        log.info(f"[跳过] {em(src.name)}：{reason}")
         ctx.store.add("skipped", info, reason=reason)
         return ctx.stats.record(SKIPPED)
 
     if ctx.dry_run:
-        log.info(f"[dry-run] would encode {src.name} "
-                 f"({info.codec_family or info.video_codec}, "
-                 f"{fmt_size(info.size)})")
+        log.info(f"[预览] 会压缩 {em(src.name)}"
+                 f"（{info.codec_family or info.video_codec}，"
+                 f"{fmt_size(info.size)}）")
         ctx.store.add("dryrun", info)
         return ctx.stats.record(DRYRUN)
 
@@ -128,7 +129,7 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
         score = verify.run_all(ctx.tools, src, tmp, info, out_info, ctx.cfg,
                                log=log, lossless_codec=ctx.lossless_codec)
         if score is not None:
-            log.info(f"[verify] {src.name}: vmaf {score:.2f}")
+            log.info(f"[校验] {em(src.name)}：VMAF {em(f'{score:.2f}')}")
 
         saved = _commit(ctx, src, tmp, target, info, crf, elapsed)
         return ctx.stats.record(OK, saved)
@@ -136,7 +137,7 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
         # 搜索阶段就看出不值得压：删掉可能留下的半成品，按跳过记账
         printer.close()
         files.remove_tmp(tmp)
-        log.info(f"[skip] {src.name}: {skipped}")
+        log.info(f"[跳过] {em(src.name)}：{skipped}")
         ctx.store.add("skipped", info, reason=str(skipped))
         return ctx.stats.record(SKIPPED)
     except BaseException as exc:  # noqa: BLE001 - 中断也要走清理
@@ -171,7 +172,8 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         info.comment,
         encode.color_args(info),
     )
-    log.info(f"[encode] {src.name}: crf={encode.fmt_crf(crf)} ({ctx.encoder})")
+    log.info(f"[编码] {em(src.name)}：crf={em(encode.fmt_crf(crf))}"
+             f"（{ctx.encoder}）")
     printer(0.0)
     t0 = time.monotonic()
     encode.run_encode(cmd, info.duration, printer)
@@ -190,9 +192,9 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
     """
     if not picked.meets_target and ctx.cfg["adaptive"].get("require_target", True):
         raise SkipFile(
-            f"even crf={encode.fmt_crf(picked.crf)} only reaches vmaf "
-            f"{picked.worst_vmaf:.2f}, below target "
-            f"{ctx.cfg['adaptive']['target_vmaf']}; not worth compressing"
+            f"连 crf={encode.fmt_crf(picked.crf)} 都只有 VMAF "
+            f"{picked.worst_vmaf:.2f}，低于目标 "
+            f"{ctx.cfg['adaptive']['target_vmaf']}，不值得压"
         )
     predicted = tracks.predicted_size(info, ctx.cfg,
                                       picked.video_bitrate, ctx.out_ext)
@@ -200,14 +202,13 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
         return
     saving = 1.0 - predicted / info.size
     floor = float(ctx.cfg["skip"].get("min_saving_ratio", 0.15))
-    log.info(f"[predict] {info.path.name}: crf={encode.fmt_crf(picked.crf)} "
-             f"sampled {picked.video_bitrate // 1000} kbps -> "
-             f"~{fmt_size(predicted)} ({saving:.1%} saving)")
+    log.info(f"[预估] {em(info.path.name)}：crf={em(encode.fmt_crf(picked.crf))}，"
+             f"样本实测 {picked.video_bitrate // 1000} kbps，预计压到 "
+             f"~{fmt_size(predicted)}（省 {em(f'{saving:.1%}')}）")
     if saving < floor:
         raise SkipFile(
-            f"sampled crf={encode.fmt_crf(picked.crf)} predicts "
-            f"{fmt_size(predicted)} ({saving:.1%} saving), below required "
-            f"{floor:.0%}"
+            f"按 crf={encode.fmt_crf(picked.crf)} 的样本码率预计只压到 "
+            f"{fmt_size(predicted)}（省 {saving:.1%}），低于要求的 {floor:.0%}"
         )
 
 
@@ -231,11 +232,11 @@ def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
     new_size = final.stat().st_size
     saved = max(0, info.size - new_size)
     saving = saved / info.size if info.size else 0.0
-    kept = ", original kept" if ctx.keep else ""
+    kept = "，原文件保留" if ctx.keep else ""
     log.info(
-        f"[ok] {src.name}: crf={encode.fmt_crf(crf)} saved {saving:.1%} "
-        f"({fmt_size(info.size)} -> {fmt_size(new_size)}, "
-        f"{elapsed:.0f}s{kept})"
+        f"[完成] {em(src.name)}：crf={encode.fmt_crf(crf)}，省下 "
+        f"{em(f'{saving:.1%}')}（{fmt_size(info.size)} -> "
+        f"{em(fmt_size(new_size))}，用了 {elapsed:.0f}s{kept}）"
     )
     ctx.store.add("ok", info, output=str(final), crf=crf, new_size=new_size,
                   saving=round(saving, 4), seconds=round(elapsed, 1),
@@ -256,7 +257,7 @@ def _handle_failure(ctx: RunContext, src: Path, info, tmp: Path,
         # 串行模式下信号只打到主线程，子进程还活着，这里补一刀
         proc.terminate_all()
         files.remove_tmp(tmp)
-        log.info(f"[abort] {src.name}: interrupted")
+        log.info(f"[中止] {em(src.name)}：已被中断")
         if isinstance(exc, BaseException) and not isinstance(exc, Exception):
             raise exc
         return ctx.stats.record(ABORTED)
@@ -264,7 +265,7 @@ def _handle_failure(ctx: RunContext, src: Path, info, tmp: Path,
     if not isinstance(exc, Exception):
         raise exc  # SystemExit / MemoryError 这类不该被当成“这个文件失败了”
 
-    log.error(f"[fail] {src.name}: {exc}")
+    log.error(f"[失败] {em(src.name)}：{exc}")
     kept_tmp = None
     if ctx.cfg["verify"].get("keep_failed_output", False):
         kept_tmp = files.keep_failed_output(tmp, src, ctx.out_ext)

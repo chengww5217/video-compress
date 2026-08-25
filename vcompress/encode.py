@@ -263,4 +263,4 @@ def run_encode(cmd: list, total_duration: float, progress_cb=None) -> None:
             pass
     if rc != 0:
         tail = "".join(err_tail).strip()[-500:]
-        raise EncodeError(f"ffmpeg exited {rc}: {tail}")
+        raise EncodeError(f"ffmpeg 退出码 {rc}：{tail}")

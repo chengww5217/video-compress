@@ -102,7 +102,7 @@ def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
     rc, _out, err = proc.run_managed(
         segment_cmd(ffmpeg, src, start, seconds, out, codec))
     if rc != 0:
-        raise VmafError(f"segment extract failed: {err.strip()[-300:]}")
+        raise VmafError(f"抽取样本片段失败：{err.strip()[-300:]}")
 
 
 # ------------------------------------------------------------------ 模型与打分
@@ -148,7 +148,7 @@ def _pooled_score(data: dict, pool: str = "harmonic_mean") -> float:
         except (TypeError, ValueError) as e:
             raise VmafError(
                 f"libvmaf {key} score is not a number: {entry[key]!r}") from e
-    raise VmafError("libvmaf output has no pooled score")
+    raise VmafError("libvmaf 的输出里没有汇总分数")
 
 
 def lavfi(shift: int = 0, model: str = "") -> str:
@@ -186,8 +186,8 @@ def measure(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0,
         if not model:
             raise
         if log:
-            log.warning(f"libvmaf model {model} is unavailable in this build; "
-                        f"falling back to the default model")
+            log.warning(f"这个构建里没有 libvmaf 模型 {model}，"
+                        f"回退到默认模型")
         return _measure(ffmpeg, distorted, reference, shift, "", pool)
 
 
@@ -204,9 +204,9 @@ def _measure(ffmpeg: str, distorted: Path, reference: Path, shift: int,
         ]
         rc, _out, err = proc.run_managed(cmd, cwd=td)
         if rc != 0:
-            raise VmafError(f"libvmaf failed: {err.strip()[-300:]}")
+            raise VmafError(f"libvmaf 执行失败：{err.strip()[-300:]}")
         try:
             data = json.loads(log_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
-            raise VmafError(f"cannot read libvmaf output: {e}") from e
+            raise VmafError(f"读不了 libvmaf 的输出：{e}") from e
         return _pooled_score(data, pool)

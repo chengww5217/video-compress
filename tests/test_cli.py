@@ -11,6 +11,7 @@ from unittest import mock
 import helpers
 from helpers import make_cfg, make_info
 from vcompress import caps, cli, power, proc
+from vcompress.logfmt import em
 from vcompress.results import ResultStore
 
 
@@ -94,7 +95,7 @@ class PreflightTests(unittest.TestCase):
     def test_unknown_build_skips_the_check(self):
         ok, _ = self.run_preflight(set(), set())
         self.assertTrue(ok)
-        self.assertIn("skipping the build self-check", self.messages())
+        self.assertIn("跳过构建自检", self.messages())
 
 
 class _CaptureHandler(logging.Handler):
@@ -144,6 +145,29 @@ class LoggingSetupTests(unittest.TestCase):
         cli.setup_logging(target)
         self.assertEqual(len(logging.getLogger().handlers), first,
                          "handlers accumulated across setup_logging calls")
+
+    def test_each_start_writes_a_session_banner(self):
+        """日志是追加写的，每次启动要有一条好找的分隔线。"""
+        target = self.root / "vc.log"
+        cli.setup_logging(target, argv=["vcompress", "/videos"])
+        self.silence_console()
+        logging.getLogger("vcompress").info("第一次")
+        cli.setup_logging(target, argv=["vcompress", "/videos", "--dry-run"])
+        self.silence_console()
+        logging.getLogger("vcompress").info("第二次")
+        text = target.read_text(encoding="utf-8")
+        self.assertEqual(text.count("启动程序 ===="), 2, text)
+        self.assertIn("命令行: vcompress /videos --dry-run", text)
+        self.assertIn("\n\n\n====", text)
+
+    def test_the_file_log_has_no_ansi_escapes(self):
+        target = self.root / "vc.log"
+        cli.setup_logging(target)
+        self.silence_console()
+        logging.getLogger("vcompress").warning(f"清掉 {em('a.tmp.mkv')}")
+        text = target.read_text(encoding="utf-8")
+        self.assertNotIn("\x1b", text)
+        self.assertIn("清掉 a.tmp.mkv", text)
 
     def test_log_file_is_rotated_instead_of_growing_forever(self):
         target = self.root / "vc.log"
@@ -276,8 +300,8 @@ class MainShutdownTests(unittest.TestCase):
         self.write_cfg("false")
         self.run_main()
         self.assertEqual(self.commands, [])
-        self.assertIn("auto shutdown: OFF", self.log_text())
-        self.assertIn("shutdown_when_done = true", self.log_text())
+        self.assertIn("自动关机：关", self.log_text())
+        self.assertIn("shutdown_when_done 改成 true", self.log_text())
 
     def test_flipping_the_flag_mid_run_still_takes_effect(self):
         self.write_cfg("false")
@@ -292,7 +316,7 @@ class MainShutdownTests(unittest.TestCase):
         self.assertEqual(self.commands, [["fake-shutdown"]])
         self.assertIn("shutdown_when_done = false",
                       self.cfg_path.read_text(encoding="utf-8"))
-        self.assertIn("reset [run] shutdown_when_done = false", self.log_text())
+        self.assertIn("shutdown_when_done 写回 false", self.log_text())
 
     def test_dry_run_never_shuts_down(self):
         self.write_cfg("true")
