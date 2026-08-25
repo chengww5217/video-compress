@@ -1,13 +1,20 @@
+# vcompress 配置覆盖层。所有默认值都内置在 vcompress/config.py 的 DEFAULTS 里，
+# 这里只写想改的项；少写一节不会出错，写错键名会直接报错。详细说明见 README。
+
+# ffmpeg / ffprobe 路径。留空 = 自动找（PATH，然后平台常见目录）。
+# 指定了但找不到会直接报错，不会悄悄改用别的 ffmpeg。
 [tools]
 ffmpeg = ""
 ffprobe = ""
 
+# 什么文件不压
 [skip]
-min_size_mb = 20
-min_saving_ratio = 0.15
+min_size_mb = 20          # 小于这个大小的直接跳过
+min_saving_ratio = 0.15   # 预估收益低于这个比例就不压
 extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"]
-tag_marker = "vcompress"
+tag_marker = "vcompress"  # 写进 comment 的标记，用来认出"已经压过了"
 
+# 每像素码率下限（BPP = 视频轨码率 ÷ 宽 ÷ 高 ÷ 帧率）。低于阈值视为已压到位。
 [skip.bpp]
 h264 = 0.05
 hevc = 0.03
@@ -16,6 +23,8 @@ av1 = 0.02
 mpeg2video = 0.12
 mpeg4 = 0.08
 
+# 编码前的粗略压缩比预估（源编码 -> 预计能压到原来的百分之多少）。
+# 自适应搜索完成后会用样本实测码率再算一次更准的，这张表只用来提前筛掉没戏的。
 [skip.expected_ratio]
 h264 = 0.55
 hevc = 0.78
@@ -27,9 +36,12 @@ flv1 = 0.45
 wmv3 = 0.50
 
 [encode]
-encoder = "av1"
+encoder = "av1"            # 用哪个 [encode.*] 节
 output_container = ".mkv"
 
+# preset 2 = 最慢最小的极限档；crf 只在 --no-adaptive 时生效（否则被搜索结果覆盖）。
+# min_bit_depth = 10：8-bit 源也用 10-bit 编，精度更高、更不容易 banding，写 8 则照源片位深。
+# extra 里那串是偏主观画质的调优参数，逐项作用见 README。
 [encode.av1]
 codec = "libsvtav1"
 preset = "2"
@@ -37,6 +49,7 @@ crf = 28
 min_bit_depth = 10
 extra = "-svtav1-params tune=0:enable-variance-boost=1:variance-boost-strength=1:variance-octile=4:qp-scale-compress-strength=1:luminance-qp-bias=10:sharpness=1:ac-bias=0.25:tf-strength=1:enable-dlf=2:scd=1:keyint=257"
 
+# placebo 已经把 rd/rdoq/psy-rdoq 拉满，这里只补 aq-mode（默认 2）。
 [encode.x265]
 codec = "libx265"
 preset = "placebo"
@@ -44,39 +57,41 @@ crf = 20
 min_bit_depth = 10
 extra = "-x265-params aq-mode=3:psy-rd=2.0"
 
+# 自适应 CRF：按画质闸门反推"能用的最高 CRF"，体积由此决定
 [adaptive]
 enabled = true
-target_vmaf = 95.0
+target_vmaf = 95.0     # 视觉无损基准，取多段里的最差段；想更激进可降到 92~93
 crf_min = 16
 crf_max = 50
-sample_seconds = 10
-sample_count = 4
-search_step = 0.25
-require_target = true
+sample_seconds = 10    # 每段样本多长
+sample_count = 4       # 从整片均匀抽几段（取最差段决策）
+search_step = 0.25     # 搜索粒度；1 级 CRF ≈ 8% 体积，只搜整数平均白扔 4%
+require_target = true  # 连 crf_min 都达不到 target 的片源直接跳过
 
 [audio]
-transcode_over_kbps = 512
-opus_kbps = 160
-lossless = "flac"
+transcode_over_kbps = 512  # 有损轨码率超过这个值才转 Opus，否则原样复制
+opus_kbps = 160            # 立体声基准，按声道数缩放（5.1 = 480k）
+lossless = "flac"          # 无损轨：flac 保持数学无损 / opus 体积更小但不可逆
 
+# 校验：任何一项不过都保留原文件。顺序是先便宜后昂贵，VMAF 抽检放最后。
 [verify]
 decode_check = true
 max_duration_diff_s = 0.5
-min_actual_saving = 0.05
-color_check = true
+min_actual_saving = 0.05   # 实际收益低于这个比例就丢弃产物
+color_check = true         # 色彩属性与 HDR 母版信息必须原样带过来
 vmaf_enabled = true
-vmaf_segments = 5
-vmaf_sample_seconds = 20
-vmaf_threshold = 93.0
-vmaf_min_segment = 90.0
-vmaf_4k_model = true
-keep_failed_output = false
+vmaf_segments = 5          # 抽几段
+vmaf_sample_seconds = 20   # 每段多长
+vmaf_threshold = 93.0      # 各段（调和平均）的均值下限
+vmaf_min_segment = 90.0    # 单段下限，防止一段崩掉被均值掩盖；0 = 关掉
+vmaf_4k_model = true       # 4K 源换用 vmaf_4k 模型（搜索与抽检共用这个开关）
+keep_failed_output = false # 校验没过时把产物留成 .failed.mkv 而不是删掉
 
 [run]
-workers = 1
+workers = 1                # 并发处理的文件数（单文件编码本身已是多线程）
 results_file = "logs/results.jsonl"
 log_file = "logs/vcompress.log"
 log_max_bytes = 5242880
 log_backups = 3
 use_recycle_bin = false
-keep_original = false
+keep_original = false      # 等价于每次都加 --keep
