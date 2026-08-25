@@ -438,7 +438,7 @@ class IntegrationTests(unittest.TestCase):
         6.048s 时，mp4 侧把这帧切在段外、mkv 侧切在段内，两段整体错开一帧，
         VMAF 会掉到 40 出头。抽样必须把切点挪到帧间隙，不能照抄请求值。
         """
-        from vcompress import encode, verify
+        from vcompress import verify, vmaf
 
         tools = Tools({"ffmpeg": "", "ffprobe": ""})
         filters = subprocess.run([tools.ffmpeg, "-hide_banner", "-filters"],
@@ -468,11 +468,11 @@ class IntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vc_align_") as td:
             root = Path(td)
             for raw in (6.048, 6.0, 6.024, 6.072):
-                start = encode.frame_aligned_start(raw, fps)
+                start = vmaf.frame_aligned_start(raw, fps)
                 ref, dist = root / "r.mkv", root / "d.mkv"
-                encode.extract_segment(tools.ffmpeg, ref_src, start, 0.5, ref)
-                encode.extract_segment(tools.ffmpeg, dist_src, start, 0.5, dist)
-                score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+                vmaf.extract_segment(tools.ffmpeg, ref_src, start, 0.5, ref)
+                vmaf.extract_segment(tools.ffmpeg, dist_src, start, 0.5, dist)
+                score = vmaf.measure(tools.ffmpeg, dist, ref)
                 self.assertGreater(
                     score, 80.0,
                     f"start {raw:.4f}s (cut {start:.4f}s) scored {score:.2f}; "
@@ -481,9 +481,9 @@ class IntegrationTests(unittest.TestCase):
 
             # 第二道保险：万一还是错了帧（VFR 之类），挪帧复核要能救回来
             ref, dist = root / "r.mkv", root / "d.mkv"
-            encode.extract_segment(tools.ffmpeg, ref_src, 6.048, 0.5, ref)
-            encode.extract_segment(tools.ffmpeg, dist_src, 6.048, 0.5, dist)
-            raw_score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+            vmaf.extract_segment(tools.ffmpeg, ref_src, 6.048, 0.5, ref)
+            vmaf.extract_segment(tools.ffmpeg, dist_src, 6.048, 0.5, dist)
+            raw_score = vmaf.measure(tools.ffmpeg, dist, ref)
             rescued = verify._score_segment(tools, ref, dist, 90.0, 1, 6.048)
             self.assertGreater(rescued, raw_score + 20,
                               "a one-frame offset must be detected and undone")

@@ -11,7 +11,8 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import encode, files, probe, proc, verify
+from . import adaptive, caps, encode, files, probe, proc, tracks, verify
+from .caps import Caps
 from .progress import ProgressPrinter
 from .results import ResultStore
 from .util import fmt_size, to_float
@@ -51,7 +52,7 @@ class RunContext:
 
     cfg: dict
     tools: probe.Tools
-    caps: encode.Caps
+    caps: Caps
     store: ResultStore
     outputs: files.OutputRegistry
     stats: RunStats = field(default_factory=RunStats)
@@ -148,14 +149,13 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
 def _encode(ctx: RunContext, src: Path, info, tmp: Path,
             printer: ProgressPrinter):
     """跑主编码，返回 (实际使用的 crf, 耗时秒)。"""
-    supported = encode.encoder_pix_fmts(ctx.tools.ffmpeg,
-                                        ctx.enc_cfg["codec"])
-    enc_cfg = encode.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
+    supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg, ctx.enc_cfg["codec"])
+    enc_cfg = caps.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
 
     # 固定 CRF 也走一遍量化：配置里写 20.5 就该按 20.5 编，而不是被截成 20
     crf = encode.quantize_crf(to_float(enc_cfg["crf"], 28))
     if ctx.adaptive_enabled and info.duration > 0:
-        picked = encode.pick_crf_adaptive(
+        picked = adaptive.pick_crf(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
             ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
         )
@@ -165,8 +165,8 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
 
     cmd = encode.build_cmd(
         ctx.tools.ffmpeg, src, tmp, enc_cfg, crf,
-        encode.audio_args(info, ctx.cfg, ctx.out_ext),
-        encode.subtitle_args(info, ctx.out_ext),
+        tracks.audio_args(info, ctx.cfg, ctx.out_ext),
+        tracks.subtitle_args(info, ctx.out_ext),
         ctx.marker,
         info.comment,
         encode.color_args(info),
@@ -194,8 +194,8 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
             f"{picked.worst_vmaf:.2f}, below target "
             f"{ctx.cfg['adaptive']['target_vmaf']}; not worth compressing"
         )
-    predicted = encode.predicted_size(info, ctx.cfg,
-                                  picked.video_bitrate, ctx.out_ext)
+    predicted = tracks.predicted_size(info, ctx.cfg,
+                                      picked.video_bitrate, ctx.out_ext)
     if predicted is None or info.size <= 0:
         return
     saving = 1.0 - predicted / info.size

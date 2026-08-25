@@ -9,7 +9,7 @@ from unittest import mock
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import encode, files, pipeline, proc, verify
+from vcompress import adaptive, caps, encode, files, pipeline, proc, verify
 from vcompress.pipeline import RunContext, RunStats
 from vcompress.results import ResultStore
 
@@ -38,7 +38,7 @@ class PipelineTestCase(unittest.TestCase):
         return RunContext(
             cfg=self.cfg,
             tools=helpers.FakeTools(),
-            caps=encode.Caps(encoders=frozenset({"libsvtav1", "libx264"}),
+            caps=caps.Caps(encoders=frozenset({"libsvtav1", "libx264"}),
                              filters=frozenset({"libvmaf"})),
             store=self.store,
             outputs=files.OutputRegistry(),
@@ -235,14 +235,14 @@ class PreEncodeRejectTests(PipelineTestCase):
     def run_with_choice(self, choice):
         ctx = self.ctx()
         p1, p2, p3 = self.patches(self.fake_encode())
-        with p1, p2, p3, mock.patch.object(pipeline.encode,
-                                           "pick_crf_adaptive",
+        with p1, p2, p3, mock.patch.object(pipeline.adaptive,
+                                           "pick_crf",
                                            return_value=choice):
             return ctx, pipeline.process_file(ctx, self.src)
 
     def test_predicted_saving_too_small_skips_before_encoding(self):
         # 700 bps * 10s / 8 = 875 字节，只省 12.5% < 15%
-        ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 700, True, 96.0))
+        ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 700, True, 96.0))
         self.assertEqual(outcome, pipeline.SKIPPED)
         self.assertTrue(self.src.exists(), "original must be untouched")
         self.assertFalse((self.root / "a.mkv").exists())
@@ -251,13 +251,13 @@ class PreEncodeRejectTests(PipelineTestCase):
 
     def test_good_prediction_proceeds(self):
         # 400 bps -> 500 字节，省 50%
-        _ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 400, True, 96.0))
+        _ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 400, True, 96.0))
         self.assertEqual(outcome, pipeline.OK)
         self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded)
 
     def test_unreachable_target_skips(self):
         _ctx, outcome = self.run_with_choice(
-            encode.CrfChoice(16, 100, False, 88.0))
+            adaptive.CrfChoice(16, 100, False, 88.0))
         self.assertEqual(outcome, pipeline.SKIPPED)
         self.assertTrue(self.src.exists())
         self.assertIn("below target", self.store.last(self.src)["reason"])
@@ -265,12 +265,12 @@ class PreEncodeRejectTests(PipelineTestCase):
     def test_unreachable_target_can_be_allowed(self):
         self.cfg["adaptive"]["require_target"] = False
         _ctx, outcome = self.run_with_choice(
-            encode.CrfChoice(16, 100, False, 88.0))
+            adaptive.CrfChoice(16, 100, False, 88.0))
         self.assertEqual(outcome, pipeline.OK)
 
     def test_unknown_bitrate_does_not_block(self):
         """预估不出来时照旧编码，别因为拿不到数就少压文件。"""
-        _ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 0, True, 96.0))
+        _ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 0, True, 96.0))
         self.assertEqual(outcome, pipeline.OK)
 
 
@@ -298,8 +298,8 @@ class FractionalCrfTests(PipelineTestCase):
                 pipeline.process_file(ctx, self.src)
         else:
             self.cfg["adaptive"]["enabled"] = True
-            with p1, p2, p3, mock.patch.object(pipeline.encode,
-                                              "pick_crf_adaptive",
+            with p1, p2, p3, mock.patch.object(pipeline.adaptive,
+                                              "pick_crf",
                                               return_value=choice):
                 pipeline.process_file(ctx, self.src)
         return seen["cmd"]
@@ -311,15 +311,15 @@ class FractionalCrfTests(PipelineTestCase):
                       "a fixed crf of 20.5 must not be truncated to 20")
 
     def test_fractional_crf_from_the_search_reaches_ffmpeg(self):
-        cmd = self.capture(encode.CrfChoice(30.25, 400, True, 96.0))
+        cmd = self.capture(adaptive.CrfChoice(30.25, 400, True, 96.0))
         self.assertIn("crf=30.25", " ".join(cmd))
 
     def test_record_keeps_integers_integral(self):
-        self.capture(encode.CrfChoice(30, 400, True, 96.0))
+        self.capture(adaptive.CrfChoice(30, 400, True, 96.0))
         self.assertEqual(self.store.last(self.src)["crf"], 30)
 
     def test_record_keeps_the_fraction(self):
-        self.capture(encode.CrfChoice(30.25, 400, True, 96.0))
+        self.capture(adaptive.CrfChoice(30.25, 400, True, 96.0))
         self.assertEqual(self.store.last(self.src)["crf"], 30.25)
 
 
@@ -327,7 +327,7 @@ class ContextTests(unittest.TestCase):
     def test_context_rejects_unknown_attributes(self):
         """dataclass 而不是空壳类：拼错属性名要立刻炸，而不是运行时才发现。"""
         ctx = RunContext(cfg=make_cfg(), tools=helpers.FakeTools(),
-                         caps=encode.Caps(), store=None,
+                         caps=caps.Caps(), store=None,
                          outputs=files.OutputRegistry())
         with self.assertRaises(Exception):
             ctx.dry_runn = True
@@ -335,7 +335,7 @@ class ContextTests(unittest.TestCase):
     def test_derived_properties(self):
         cfg = make_cfg()
         ctx = RunContext(cfg=cfg, tools=helpers.FakeTools(),
-                         caps=encode.Caps(), store=None,
+                         caps=caps.Caps(), store=None,
                          outputs=files.OutputRegistry(), encoder="x265")
         self.assertEqual(ctx.out_ext, ".mkv")
         self.assertEqual(ctx.enc_cfg["codec"], "libx265")
@@ -344,7 +344,7 @@ class ContextTests(unittest.TestCase):
 
     def test_adaptive_can_be_disabled_from_either_side(self):
         cfg = make_cfg()
-        base = dict(cfg=cfg, tools=helpers.FakeTools(), caps=encode.Caps(),
+        base = dict(cfg=cfg, tools=helpers.FakeTools(), caps=caps.Caps(),
                     store=None, outputs=files.OutputRegistry())
         self.assertTrue(RunContext(**base, adaptive=True).adaptive_enabled)
         self.assertFalse(RunContext(**base, adaptive=False).adaptive_enabled)

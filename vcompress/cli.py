@@ -7,7 +7,8 @@ import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import config, encode, files, pipeline, probe, proc
+from . import config, files, pipeline, probe, proc
+from .caps import Caps
 from .pipeline import RunContext, RunStats
 from .results import ResultStore
 from .util import fmt_size
@@ -44,7 +45,7 @@ def setup_logging(log_file: Path, max_bytes: int = 5_242_880,
     root.addHandler(fh)
 
 
-def preflight(caps: encode.Caps, cfg: dict, encoder: str,
+def preflight(caps: Caps, cfg: dict, encoder: str,
               adaptive: bool) -> bool:
     """先确认这个 ffmpeg 构建能干活，别等编码到一半才报错。"""
     codec = cfg["encode"][encoder]["codec"]
@@ -193,7 +194,7 @@ def main(argv=None) -> int:
         return EXIT_USAGE
     log.info(f"ffmpeg: {tools.ffmpeg}")
 
-    caps = encode.Caps.probe(tools.ffmpeg)
+    caps = Caps.probe(tools.ffmpeg)
     if not preflight(caps, cfg, encoder, args.adaptive):
         return EXIT_FAILED
 

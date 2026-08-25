@@ -7,7 +7,7 @@
 import tempfile
 from pathlib import Path
 
-from . import encode, proc
+from . import proc, vmaf
 from .util import to_float, to_int
 
 
@@ -102,7 +102,7 @@ def vmaf_model(info, cfg) -> str:
     自适应搜索和这里的抽检必须用同一把尺子，所以模型选择只有一个开关
     （[verify] vmaf_4k_model），搜索那边也读它。
     """
-    return encode.vmaf_model_for(
+    return vmaf.model_for(
         getattr(info, "width", 0), getattr(info, "height", 0),
         bool(cfg["verify"].get("vmaf_4k_model", True)),
     )
@@ -120,15 +120,15 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
     出来的分数会崩到 30~60。前后各挪一帧再量，如果分数立刻回到正常水平，
     说明是对齐问题而不是画质问题，取对齐后的分数。
     """
-    score = encode.vmaf_score(tools.ffmpeg, dist, ref, model=model, log=log)
+    score = vmaf.measure(tools.ffmpeg, dist, ref, model=model, log=log)
     if score >= threshold:
         return score
     best, best_shift = score, 0
     for shift in (1, -1):
         try:
-            alt = encode.vmaf_score(tools.ffmpeg, dist, ref, shift,
-                                    model=model, log=log)
-        except encode.EncodeError:
+            alt = vmaf.measure(tools.ffmpeg, dist, ref, shift,
+                               model=model, log=log)
+        except vmaf.VmafError:
             continue
         if alt > best:
             best, best_shift = alt, shift
@@ -156,7 +156,8 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
         return None, "unknown duration, cannot pick sample points"
 
     records = []
-    starts = encode.sample_starts(duration, seconds, segments, fps=fps)
+    # 两个文件用同一批切点，且切在帧间隙里，抽出的段才逐帧对应
+    starts = vmaf.sample_starts(duration, seconds, segments, fps=fps)
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         root = Path(td)
         for i, start in enumerate(starts):
@@ -165,16 +166,16 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
             if log:
                 log.info(f"vmaf spot check: segment {i + 1}/{len(starts)}")
             try:
-                encode.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
-                                       lossless_codec)
-                encode.extract_segment(tools.ffmpeg, compressed, start,
-                                       seconds, dist, lossless_codec)
+                vmaf.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
+                                     lossless_codec)
+                vmaf.extract_segment(tools.ffmpeg, compressed, start,
+                                     seconds, dist, lossless_codec)
                 score = _score_segment(tools, ref, dist, threshold, i + 1,
                                        start, log, model)
                 if log:
                     log.debug(f"vmaf segment {i + 1} at {start:.1f}s: {score:.2f}")
                 records.append((start, score))
-            except encode.EncodeError as e:
+            except vmaf.VmafError as e:
                 return None, str(e)
     if not records:
         return None, "no vmaf segment could be measured"

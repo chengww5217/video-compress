@@ -254,18 +254,26 @@ video-compress/
 │   ├── config.py        # 内置默认值、深合并、配置校验
 │   ├── pipeline.py      # 单文件流程（探测→编码→校验→落地）与运行上下文
 │   ├── probe.py         # ffprobe 探测与跳过判定
-│   ├── encode.py        # 编码参数生成与执行、抽样、自适应 CRF（0.25 级）、体积预估
+│   ├── caps.py          # 这个 ffmpeg 构建能干什么 + 像素格式决策
+│   ├── tracks.py        # 音轨/字幕处置与按此预估体积
+│   ├── encode.py        # 编码参数生成与编码执行（含进度解析）
+│   ├── adaptive.py      # 自适应 CRF 搜索（0.25 级二分）
+│   ├── vmaf.py          # 抽无损样本 + libvmaf 打分（搜索与校验共用）
 │   ├── verify.py        # 解码校验、基础比对、VMAF 抽检与校验链编排
 │   ├── files.py         # 文件发现、命名规则、输出名预留、删除策略
 │   ├── results.py       # results.jsonl 读写与缓存新鲜度判断
 │   ├── progress.py      # 单行进度渲染
 │   ├── proc.py          # 子进程注册表与取消（Ctrl+C 时统一杀干净）
 │   └── util.py          # 类型宽松转换与格式化
-└── tests/               # 测试（unittest）
+└── tests/               # 测试（unittest），一个模块一份
     ├── helpers.py           # 配置与 VideoInfo 替身
     ├── test_config.py       # 默认值/配置文件一致性与校验行为
-    ├── test_probe.py        # 码率估算与跳过判定
-    ├── test_encode.py       # 参数生成、小数 CRF、进度解析、像素格式、体积预估
+    ├── test_probe.py        # 码率估算、交错判定与跳过判定
+    ├── test_caps.py         # 能力解析、像素格式选择与位深提升
+    ├── test_tracks.py       # 音轨/字幕参数与体积预估
+    ├── test_encode.py       # 参数生成、小数 CRF、进度解析、命令拼装
+    ├── test_adaptive.py     # 二分收敛、最差段决策、样本码率
+    ├── test_vmaf.py         # 抽样位置/切点、模型选择、分数解析
     ├── test_verify.py       # 校验链、色彩/HDR 比对、VMAF 判定与单段下限
     ├── test_files.py        # 命名、扫描、输出名并发预留
     ├── test_results.py      # 记录存储与缓存新鲜度
@@ -273,6 +281,8 @@ video-compress/
     ├── test_cli.py          # 参数解析、自检、日志轮转、调度选择
     └── test_integration.py  # 真实 ffmpeg 端到端（缺 ffmpeg 自动跳过）
 ```
+
+模块之间的依赖是单向的：`caps`/`tracks`/`vmaf` 只依赖 `proc`/`util`，`encode` 用 `tracks` 的容器分类，`adaptive` 用 `encode`+`vmaf`，`verify` 用 `vmaf`。校验模块不再为了量 VMAF 去依赖编码模块。
 
 ## 开发与测试
 

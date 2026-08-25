@@ -9,7 +9,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import cli, encode
+from vcompress import caps, cli
 from vcompress.results import ResultStore
 
 
@@ -55,9 +55,9 @@ class PreflightTests(unittest.TestCase):
         logging.getLogger("vcompress").removeHandler(self.handler)
 
     def run_preflight(self, encoders, filters, adaptive=True):
-        caps = encode.Caps(encoders=frozenset(encoders),
-                           filters=frozenset(filters))
-        return cli.preflight(caps, self.cfg, "av1", adaptive), caps
+        built = caps.Caps(encoders=frozenset(encoders),
+                          filters=frozenset(filters))
+        return cli.preflight(built, self.cfg, "av1", adaptive), built
 
     def messages(self):
         return "\n".join(self.logs)

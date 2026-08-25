@@ -8,7 +8,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import encode, verify
+from vcompress import verify, vmaf
 from vcompress.verify import check_basic, check_color
 
 
@@ -226,7 +226,7 @@ class VmafModelSelectionTests(unittest.TestCase):
     def test_4k_source_gets_the_4k_model(self):
         info = make_info(width=3840, height=2160)
         self.assertEqual(verify.vmaf_model(info, self.cfg),
-                         encode.VMAF_MODEL_4K)
+                         vmaf.MODEL_4K)
 
     def test_1080p_source_gets_the_default(self):
         self.assertEqual(verify.vmaf_model(make_info(), self.cfg), "")
@@ -247,19 +247,19 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.extracted = []
         self.scores = [96.0, 94.0]
         self.shifts = []
-        self.orig_extract = encode.extract_segment
-        self.orig_score = encode.vmaf_score
-        encode.extract_segment = lambda ff, src, start, secs, out, codec="libx264": \
+        self.orig_extract = vmaf.extract_segment
+        self.orig_score = vmaf.measure
+        vmaf.extract_segment = lambda ff, src, start, secs, out, codec="libx264": \
             self.extracted.append((Path(src).name, round(start, 3)))
-        encode.vmaf_score = self.fake_score
+        vmaf.measure = self.fake_score
 
     def fake_score(self, ff, dist, ref, shift=0, **kw):
         self.shifts.append(shift)
         return self.scores[len(self.extracted) // 2 - 1]
 
     def tearDown(self):
-        encode.extract_segment = self.orig_extract
-        encode.vmaf_score = self.orig_score
+        vmaf.extract_segment = self.orig_extract
+        vmaf.measure = self.orig_score
 
     def check(self, duration=600.0, fps=0.0):
         return verify.vmaf_spot_check(FakeTools(), Path("a.mkv"),
@@ -324,9 +324,9 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_ffmpeg_failure_is_surfaced_not_raised(self):
         def boom(*a, **kw):
-            raise encode.EncodeError("libvmaf failed: no such filter")
+            raise vmaf.VmafError("libvmaf failed: no such filter")
 
-        encode.vmaf_score = boom
+        vmaf.measure = boom
         mean, msg = self.check()
         self.assertIsNone(mean)
         self.assertIn("no such filter", msg)
@@ -368,7 +368,7 @@ class VmafSpotCheckTests(unittest.TestCase):
             self.shifts.append(shift)
             return 95.0 if shift else 40.0
 
-        encode.vmaf_score = score
+        vmaf.measure = score
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 95.0)
         self.assertEqual(msg, "")
@@ -376,7 +376,7 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_genuinely_bad_segment_still_fails(self):
         """挪帧也救不回来的低分说明画质真的坏了，必须照旧判失败。"""
-        encode.vmaf_score = lambda ff, dist, ref, shift=0, **kw: 70.0
+        vmaf.measure = lambda ff, dist, ref, shift=0, **kw: 70.0
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 70.0)
         self.assertIn("70.00", msg)
