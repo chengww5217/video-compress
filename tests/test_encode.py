@@ -334,6 +334,52 @@ class SegmentCmdTests(unittest.TestCase):
         self.assertEqual(cmd[cmd.index("-crf") + 1], "0")
 
 
+class FrameAlignedStartTests(unittest.TestCase):
+    FPS = 24000 / 1001  # 23.976，一帧 41.708ms，mkv 的毫秒时间戳装不准
+
+    def test_cut_sits_halfway_between_two_frames(self):
+        cut = encode.frame_aligned_start(20.0, self.FPS)
+        self.assertAlmostEqual((cut * self.FPS) % 1.0, 0.5, places=6)
+
+    def test_nearby_starts_collapse_onto_the_same_cut(self):
+        """帧边界两侧的请求点必须归到同一个切点，两个文件才不会错开一帧。"""
+        below = encode.frame_aligned_start(20.0409, self.FPS)
+        above = encode.frame_aligned_start(20.0625, self.FPS)
+        self.assertAlmostEqual(below, above, places=6)
+
+    def test_cut_stays_within_half_a_frame_of_the_request(self):
+        for start in (17.3, 100.0, 4490.2):
+            cut = encode.frame_aligned_start(start, self.FPS)
+            self.assertLessEqual(abs(cut - start), 1.0 / self.FPS)
+
+    def test_unknown_fps_leaves_the_start_alone(self):
+        self.assertEqual(encode.frame_aligned_start(12.5, 0.0), 12.5)
+        self.assertEqual(encode.frame_aligned_start(12.5, -1.0), 12.5)
+
+    def test_never_goes_negative(self):
+        self.assertEqual(encode.frame_aligned_start(0.0, self.FPS), 0.0)
+        self.assertEqual(encode.frame_aligned_start(0.01, self.FPS), 0.0)
+        self.assertEqual(encode.frame_aligned_start(-5.0, self.FPS), 0.0)
+
+
+class VmafLavfiTests(unittest.TestCase):
+    def test_both_inputs_are_renumbered_by_frame(self):
+        lavfi = encode.vmaf_lavfi()
+        self.assertEqual(lavfi.count("setpts=N/FR/TB"), 2)
+        self.assertNotIn("trim", lavfi)
+        self.assertIn("libvmaf", lavfi)
+
+    def test_positive_shift_trims_the_distorted_side(self):
+        lavfi = encode.vmaf_lavfi(1)
+        self.assertIn("[0:v]trim=start_frame=1,setpts", lavfi)
+        self.assertIn("[1:v]setpts", lavfi)
+
+    def test_negative_shift_trims_the_reference_side(self):
+        lavfi = encode.vmaf_lavfi(-2)
+        self.assertIn("[1:v]trim=start_frame=2,setpts", lavfi)
+        self.assertIn("[0:v]setpts", lavfi)
+
+
 class AdaptiveFallbackTests(unittest.TestCase):
     def test_missing_binary_returns_none(self):
         import logging

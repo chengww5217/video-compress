@@ -336,6 +336,22 @@ def _run_quiet(cmd: list) -> tuple:
 SEEK_LEADIN_S = 2.0
 
 
+def frame_aligned_start(start: float, fps: float) -> float:
+    """把切点挪到两帧中间，切出来的片段才不会在两个文件里错开一帧。
+
+    同一帧的时间戳在不同容器里精度不同：mp4 常用 1/24000，matroska 只有
+    1/1000，23.976fps 下一帧的 pts 两边能差近 1ms。切点正好压在帧边界上时，
+    一边把这帧算进片段、另一边算在片段外，参考段和待测段就整体错开一帧，
+    libvmaf 逐帧比出来的分数会从 91 掉到 33——画质没问题，是量错了。
+    切在帧间隙正中间，±1ms 的抖动再也翻不过边界。
+    """
+    if fps <= 0 or start <= 0:
+        return max(0.0, start)
+    step = 1.0 / fps
+    frame = round(start / step)
+    return max(0.0, (frame - 0.5) * step)
+
+
 def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
                 out: Path) -> list:
     """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确 seek 微调。
@@ -391,14 +407,31 @@ def _pooled_mean(data: dict) -> float:
         raise EncodeError(f"libvmaf mean score is not a number: {mean!r}") from e
 
 
-def vmaf_score(ffmpeg: str, distorted: Path, reference: Path):
+def vmaf_lavfi(shift: int = 0) -> str:
+    """libvmaf 滤镜链：两路都按帧号重编时间戳，逐帧对齐后再比。
+
+    framesync 按时间戳配对，两个片段的 pts 网格哪怕整体差 1ms 都会错配；
+    setpts=N/FR/TB 把两路都改成同一套帧号时间戳，配对只看第几帧。
+    shift>0 丢掉待测段开头的帧，shift<0 丢掉参考段开头的帧，用来验证
+    「分数低是不是因为错了一帧」。
+    """
+    d_trim = f"trim=start_frame={shift}," if shift > 0 else ""
+    r_trim = f"trim=start_frame={-shift}," if shift < 0 else ""
+    return (
+        f"[0:v]{d_trim}setpts=N/FR/TB[d];"
+        f"[1:v]{r_trim}setpts=N/FR/TB[r];"
+        f"[d][r]libvmaf=log_path=vmaf.json:log_fmt=json"
+    )
+
+
+def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0):
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         log_path = Path(td) / "vmaf.json"
         cmd = [
             ffmpeg, "-hide_banner",
             "-i", str(distorted),
             "-i", str(reference),
-            "-lavfi", "libvmaf=log_path=vmaf.json:log_fmt=json",
+            "-lavfi", vmaf_lavfi(shift),
             "-f", "null", "-",
         ]
         rc, _out, err = run_managed(cmd, cwd=td)

@@ -83,20 +83,25 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.cfg["verify"]["vmaf_sample_seconds"] = 5
         self.extracted = []
         self.scores = [96.0, 94.0]
+        self.shifts = []
         self.orig_extract = encode.extract_segment
         self.orig_score = encode.vmaf_score
         encode.extract_segment = lambda ff, src, start, secs, out: \
             self.extracted.append((Path(src).name, round(start, 3)))
-        encode.vmaf_score = lambda ff, dist, ref: \
-            self.scores[len(self.extracted) // 2 - 1]
+        encode.vmaf_score = self.fake_score
+
+    def fake_score(self, ff, dist, ref, shift=0):
+        self.shifts.append(shift)
+        return self.scores[len(self.extracted) // 2 - 1]
 
     def tearDown(self):
         encode.extract_segment = self.orig_extract
         encode.vmaf_score = self.orig_score
 
-    def check(self, duration=600.0):
+    def check(self, duration=600.0, fps=0.0):
         return verify.vmaf_spot_check(FakeTools(), Path("a.mkv"),
-                                      Path("b.mkv"), duration, self.cfg)
+                                      Path("b.mkv"), duration, self.cfg,
+                                      fps=fps)
 
     def test_disabled_is_not_reported_as_unavailable(self):
         self.cfg["verify"]["vmaf_enabled"] = False
@@ -150,6 +155,50 @@ class VmafSpotCheckTests(unittest.TestCase):
         for _name, start in self.extracted:
             self.assertGreaterEqual(start, 0.0)
             self.assertLessEqual(start, 8.0)
+
+    def test_reference_and_distorted_share_one_cut_point(self):
+        self.check(fps=24000 / 1001)
+        starts = [s for _n, s in self.extracted]
+        self.assertEqual(starts[0], starts[1], "ref/dist must be cut alike")
+        self.assertEqual(starts[2], starts[3])
+
+    def test_cut_points_land_between_frames(self):
+        """切点必须落在帧间隙里，否则容器时间戳取整会让两边错开一帧。"""
+        fps = 24000 / 1001
+        self.check(fps=fps)
+        for _name, start in self.extracted:
+            offset = (start * fps) % 1.0
+            self.assertAlmostEqual(offset, 0.5, places=2,
+                                   msg=f"{start}s sits on a frame boundary")
+
+    def test_low_segment_is_rechecked_for_a_frame_offset(self):
+        """错帧量出来的低分不该判死刑：挪一帧还原后按真实分数算。"""
+        def score(ff, dist, ref, shift=0):
+            self.shifts.append(shift)
+            return 95.0 if shift else 40.0
+
+        encode.vmaf_score = score
+        mean, msg = self.check()
+        self.assertAlmostEqual(mean, 95.0)
+        self.assertEqual(msg, "")
+        self.assertIn(1, self.shifts)
+
+    def test_genuinely_bad_segment_still_fails(self):
+        """挪帧也救不回来的低分说明画质真的坏了，必须照旧判失败。"""
+        encode.vmaf_score = lambda ff, dist, ref, shift=0: 70.0
+        mean, msg = self.check()
+        self.assertAlmostEqual(mean, 70.0)
+        self.assertIn("below threshold", msg)
+
+    def test_good_scores_are_not_rechecked(self):
+        self.check()
+        self.assertEqual(self.shifts, [0, 0], "no extra vmaf runs when passing")
+
+    def test_failure_message_says_where_it_measured(self):
+        self.scores = [80.0, 82.0]
+        _mean, msg = self.check(duration=600.0)
+        self.assertRegex(msg, r"80\.00@\d+s")
+        self.assertRegex(msg, r"82\.00@\d+s")
 
 
 class FakeTools:

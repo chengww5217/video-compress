@@ -44,6 +44,7 @@ def make_cfg():
             "vmaf_segments": 3,
             "vmaf_sample_seconds": 20,
             "vmaf_threshold": 93.0,
+            "keep_failed_output": False,
         },
         "run": {
             "workers": 1,

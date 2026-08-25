@@ -67,6 +67,7 @@ vmaf_enabled = false
 vmaf_segments = 2
 vmaf_sample_seconds = 5
 vmaf_threshold = 90.0
+keep_failed_output = false
 
 [run]
 workers = 1
@@ -428,6 +429,92 @@ class IntegrationTests(unittest.TestCase):
         self.assertGreater(mean, 90.0,
                            "misaligned sampling would collapse the score")
         self.assertEqual(msg, "")
+
+    def test_n_fractional_fps_sampling_survives_timestamp_rounding(self):
+        """23.976fps + matroska 毫秒时间戳：切点压在帧边界上会错帧，分数假崩。
+
+        issue #2 就是这个：编码 5 小时后第 3 段量出 53 分，画质其实没问题。
+        源里第 145 帧真实时刻 6.0477s，进 mkv 被写成 6.048s；切点正好是
+        6.048s 时，mp4 侧把这帧切在段外、mkv 侧切在段内，两段整体错开一帧，
+        VMAF 会掉到 40 出头。抽样必须把切点挪到帧间隙，不能照抄请求值。
+        """
+        from vcompress import encode, verify
+
+        tools = Tools({"ffmpeg": "", "ffprobe": ""})
+        filters = subprocess.run([tools.ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True, timeout=60)
+        if "libvmaf" not in filters.stdout:
+            self.skipTest("ffmpeg build has no libvmaf")
+
+        fps = 24000 / 1001
+        ref_src = self.root / "frac_src.mp4"     # 时间基 1/24000，帧时刻精确
+        dist_src = self.root / "frac_out.mkv"    # 时间基 1/1000，帧时刻要取整
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             "testsrc2=duration=12:size=320x180:rate=24000/1001",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "12",
+             "-pix_fmt", "yuv420p", str(ref_src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(ref_src), "-c:v", "libx265", "-preset", "ultrafast",
+             "-crf", "28", "-x265-params", "log-level=none",
+             "-pix_fmt", "yuv420p", str(dist_src)],
+            check=True, capture_output=True, timeout=180,
+        )
+
+        with tempfile.TemporaryDirectory(prefix="vc_align_") as td:
+            root = Path(td)
+            for raw in (6.048, 6.0, 6.024, 6.072):
+                start = encode.frame_aligned_start(raw, fps)
+                ref, dist = root / "r.mkv", root / "d.mkv"
+                encode.extract_segment(tools.ffmpeg, ref_src, start, 0.5, ref)
+                encode.extract_segment(tools.ffmpeg, dist_src, start, 0.5, dist)
+                score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+                self.assertGreater(
+                    score, 80.0,
+                    f"start {raw:.4f}s (cut {start:.4f}s) scored {score:.2f}; "
+                    f"the sampled segments are off by a frame again"
+                )
+
+            # 第二道保险：万一还是错了帧（VFR 之类），挪帧复核要能救回来
+            ref, dist = root / "r.mkv", root / "d.mkv"
+            encode.extract_segment(tools.ffmpeg, ref_src, 6.048, 0.5, ref)
+            encode.extract_segment(tools.ffmpeg, dist_src, 6.048, 0.5, dist)
+            raw_score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+            rescued = verify._score_segment(tools, ref, dist, 90.0, 1, 6.048)
+            self.assertGreater(rescued, raw_score + 20,
+                              "a one-frame offset must be detected and undone")
+
+    def test_o_rejected_output_can_be_kept_for_inspection(self):
+        cfg = self.root / "keepfail.toml"
+        cfg.write_text(
+            INTEGRATION_CONFIG.replace("{root}", self.root.as_posix())
+            .replace("min_actual_saving = 0.05", "min_actual_saving = 0.99")
+            .replace("keep_failed_output = false", "keep_failed_output = true"),
+            encoding="utf-8",
+        )
+        src = self.root / "keepfail.mp4"
+        ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
+        subprocess.run(
+            [ff, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i", "testsrc2=duration=2:size=160x90:rate=15",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", str(src)],
+            check=True, capture_output=True, timeout=120,
+        )
+        r = subprocess.run(
+            [sys.executable, "-m", "vcompress", str(src), "--config", str(cfg)],
+            cwd=str(helpers.ROOT), capture_output=True, text=True,
+            encoding="utf-8", errors="replace", timeout=300,
+        )
+        self.assertEqual(r.returncode, 1, r.stdout)
+        self.assertTrue(src.exists(), "original must survive a failed verify")
+        self.assertTrue((self.root / "keepfail.failed.mkv").exists(),
+                        "the rejected encode should be kept when configured")
+        self.assertFalse((self.root / "keepfail.tmp.mkv").exists())
 
     def test_m_missing_encoder_fails_before_touching_anything(self):
         cfg = self.root / "badcodec.toml"

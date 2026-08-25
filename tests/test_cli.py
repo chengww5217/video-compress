@@ -8,8 +8,8 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.cli import (ResultStore, clean_stale_tmp, gather_files,
-                           resolve_final_path, resolve_run_path)
+from vcompress.cli import (ResultStore, _keep_failed_tmp, clean_stale_tmp,
+                           gather_files, resolve_final_path, resolve_run_path)
 
 
 class ResultStoreTests(unittest.TestCase):
@@ -164,6 +164,38 @@ class ResolveFinalPathTests(unittest.TestCase):
             resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
                                keep=False)
         self.assertIn("already exists", str(cm.exception))
+
+
+class KeepFailedTmpTests(unittest.TestCase):
+    """校验没过时可以留下产物，供人工确认到底是画质坏了还是量错了。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.src = self.root / "a.mp4"
+        self.src.write_bytes(b"src")
+        self.tmp_out = self.root / "a.tmp.mkv"
+        self.tmp_out.write_bytes(b"encoded")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_renamed_next_to_the_source(self):
+        kept = _keep_failed_tmp(self.tmp_out, self.src, ".mkv")
+        self.assertEqual(kept, self.root / "a.failed.mkv")
+        self.assertEqual(kept.read_bytes(), b"encoded")
+        self.assertFalse(self.tmp_out.exists())
+        self.assertTrue(self.src.exists(), "original must survive")
+
+    def test_existing_name_is_never_overwritten(self):
+        victim = self.root / "a.failed.mkv"
+        victim.write_bytes(b"older attempt")
+        self.assertIsNone(_keep_failed_tmp(self.tmp_out, self.src, ".mkv"))
+        self.assertEqual(victim.read_bytes(), b"older attempt")
+
+    def test_missing_temp_file_is_a_no_op(self):
+        self.tmp_out.unlink()
+        self.assertIsNone(_keep_failed_tmp(self.tmp_out, self.src, ".mkv"))
 
 
 class ResolveRunPathTests(unittest.TestCase):

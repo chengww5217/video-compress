@@ -222,7 +222,8 @@ def process_file(ctx: Ctx, src: Path):
             raise RuntimeError(msg)
 
         score, msg = verify.vmaf_spot_check(ctx.tools, src, tmp,
-                                            info.duration, ctx.cfg, log=log)
+                                            info.duration, ctx.cfg, log=log,
+                                            fps=info.fps)
         if score is not None:
             log.info(f"[verify] {src.name}: vmaf {score:.2f}")
         if msg and score is None:
@@ -263,9 +264,35 @@ def process_file(ctx: Ctx, src: Path):
             _remove_tmp(tmp)
             return "aborted"
         log.error(f"[fail] {src.name}: {e}")
-        store.add("failed", info, stage="process", error=str(e)[:500])
-        _remove_tmp(tmp)
+        kept_tmp = None
+        if ctx.cfg["verify"].get("keep_failed_output", False):
+            kept_tmp = _keep_failed_tmp(tmp, src, out_ext)
+        store.add("failed", info, stage="process", error=str(e)[:500],
+                  failed_output=str(kept_tmp) if kept_tmp else None)
+        if kept_tmp is None:
+            _remove_tmp(tmp)
         return "failed"
+
+
+def _keep_failed_tmp(tmp: Path, src: Path, out_ext: str):
+    """校验没过时按需留下产物，别让几小时的编码结果直接消失。
+
+    命名 <名字>.failed<扩展名>，名字被占就不留（本项目一律不覆盖已有文件）。
+    """
+    if not tmp.exists():
+        return None
+    dest = src.with_name(f"{src.stem}.failed{out_ext}")
+    if dest.exists():
+        log.warning(f"{dest.name} already exists; discarding {tmp.name} instead")
+        return None
+    try:
+        os.replace(tmp, dest)
+    except OSError as e:
+        log.error(f"cannot keep failed output {dest.name}: {e}")
+        return None
+    log.warning(f"kept the rejected output for inspection: {dest.name} "
+                f"(original untouched)")
+    return dest
 
 
 def _remove_tmp(tmp: Path):
