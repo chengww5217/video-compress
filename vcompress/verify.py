@@ -27,7 +27,8 @@ def decode_errors(ffmpeg: str, path: Path):
     return None
 
 
-def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
+def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg,
+                expected_size=None):
     max_diff = to_float(cfg["verify"].get("max_duration_diff_s"), 0.5)
     if orig_info.duration > 0 and out_info.duration > 0:
         diff = abs(orig_info.duration - out_info.duration)
@@ -35,12 +36,14 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
             return False, f"duration mismatch {diff:.2f}s > {max_diff}s"
     if not out_info.video_codec:
         return False, "output has no video stream"
-    # 分辨率必须一致：滤镜链写错、编码器悄悄降采样都会在这里暴露
-    if orig_info.width and orig_info.height and out_info.width and out_info.height:
-        if (orig_info.width, orig_info.height) != (out_info.width, out_info.height):
+    # 分辨率必须等于「期望几何」：默认就是源分辨率，裁掉黑边时是裁切后的尺寸。
+    # 滤镜链写错、编码器悄悄降采样都会在这里暴露。
+    want_w, want_h = expected_size or (orig_info.width, orig_info.height)
+    if want_w and want_h and out_info.width and out_info.height:
+        if (want_w, want_h) != (out_info.width, out_info.height):
             return False, (
-                f"resolution changed {orig_info.width}x{orig_info.height} -> "
-                f"{out_info.width}x{out_info.height}"
+                f"resolution {out_info.width}x{out_info.height} is not the "
+                f"expected {want_w}x{want_h}"
             )
     for kind, before, after in (
         ("audio", len(orig_info.audio_codecs), len(out_info.audio_codecs)),
@@ -143,7 +146,8 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
 
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     cfg, log=None, fps: float = 0.0,
-                    lossless_codec: str = "libx264", model: str = ""):
+                    lossless_codec: str = "libx264", model: str = "",
+                    vf: str = ""):
     vcfg = cfg["verify"]
     if not vcfg.get("vmaf_enabled", True):
         return None, ""
@@ -169,7 +173,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                 log.info(f"vmaf spot check: segment {i + 1}/{segments}")
             try:
                 encode.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
-                                       lossless_codec)
+                                       lossless_codec, vf)
                 encode.extract_segment(tools.ffmpeg, compressed, start,
                                        seconds, dist, lossless_codec)
                 score = _score_segment(tools, ref, dist, threshold, i + 1,
@@ -200,7 +204,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
 
 
 def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
-            log=None, lossless_codec: str = "libx264"):
+            log=None, lossless_codec: str = "libx264", plan=None):
     """跑完整校验链，任何硬失败抛 VerifyError；返回 VMAF 均值（可能为 None）。
 
     顺序是刻意的：先做便宜的（解码、时长、体积、色彩元数据），最后才做最贵的
@@ -211,8 +215,9 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
         if errs:
             raise VerifyError("decode check failed: " + "; ".join(errs[:3]))
 
+    expected = plan.expected_size(orig_info) if plan is not None else None
     ok, msg = check_basic(orig_info, out_info, orig_info.size,
-                          out.stat().st_size, cfg)
+                          out.stat().st_size, cfg, expected)
     if not ok:
         raise VerifyError(msg)
 
@@ -223,7 +228,8 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     score, msg = vmaf_spot_check(tools, src, out, orig_info.duration, cfg,
                                  log=log, fps=orig_info.fps,
                                  lossless_codec=lossless_codec,
-                                 model=vmaf_model(orig_info, cfg))
+                                 model=vmaf_model(orig_info, cfg),
+                                 vf=plan.vf if plan is not None else "")
     if msg and score is None:
         # 构建里没有 libvmaf 之类的环境问题：告警但不否决，其余检查已经过了
         if log:

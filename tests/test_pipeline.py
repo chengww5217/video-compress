@@ -9,7 +9,7 @@ from unittest import mock
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import encode, files, pipeline, proc, verify
+from vcompress import analyze, encode, files, pipeline, proc, verify
 from vcompress.pipeline import RunContext, RunStats
 from vcompress.results import ResultStore
 
@@ -272,6 +272,63 @@ class PreEncodeRejectTests(PipelineTestCase):
         """预估不出来时照旧编码，别因为拿不到数就少压文件。"""
         _ctx, outcome = self.run_with_choice(encode.CrfChoice(30, 0, True, 96.0))
         self.assertEqual(outcome, pipeline.OK)
+
+
+class SourceAnalysisTests(PipelineTestCase):
+    """探查结果要真的影响编码命令，telecine 要在编码前拦下。"""
+
+    def run_with_plan(self, plan):
+        seen = {}
+
+        def run_encode(cmd, duration, cb=None):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(self.encoded)
+
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(run_encode)
+        with p1, p2, p3, mock.patch.object(pipeline.analyze, "analyse",
+                                           return_value=plan):
+            outcome = pipeline.process_file(ctx, self.src)
+        return outcome, seen.get("cmd", [])
+
+    def test_filters_reach_the_encode_command(self):
+        plan = analyze.SourcePlan(
+            filters=("bwdif=mode=send_frame:parity=auto:deint=all",
+                     "crop=1920:800:0:140"),
+            width=1920, height=800)
+        outcome, cmd = self.run_with_plan(plan)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertIn("-vf", cmd)
+        self.assertEqual(cmd[cmd.index("-vf") + 1],
+                         "bwdif=mode=send_frame:parity=auto:deint=all,"
+                         "crop=1920:800:0:140")
+
+    def test_no_filters_means_no_vf_flag(self):
+        outcome, cmd = self.run_with_plan(analyze.SourcePlan())
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertNotIn("-vf", cmd)
+
+    def test_telecine_is_skipped_before_encoding(self):
+        plan = analyze.SourcePlan(skip_reason="telecined source (20% repeated "
+                                             "fields)")
+        outcome, cmd = self.run_with_plan(plan)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertEqual(cmd, [], "must not have encoded anything")
+        self.assertTrue(self.src.exists())
+        self.assertIn("telecined", self.store.last(self.src)["reason"])
+
+    def test_cropped_geometry_is_handed_to_verification(self):
+        """裁了黑边之后，产物分辨率本来就该和源不同，校验得知道期望值。"""
+        plan = analyze.SourcePlan(filters=("crop=1920:800:0:140",),
+                                  width=1920, height=800)
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(self.fake_encode())
+        with p1, p2, p3, mock.patch.object(pipeline.analyze, "analyse",
+                                           return_value=plan):
+            with mock.patch.object(pipeline.verify, "run_all",
+                                   return_value=95.0) as run_all:
+                pipeline.process_file(ctx, self.src)
+        self.assertIs(run_all.call_args.kwargs["plan"], plan)
 
 
 class ContextTests(unittest.TestCase):

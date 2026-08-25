@@ -421,7 +421,8 @@ def color_args(info) -> list:
 
 def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
               crf: int, a_args: list, s_args: list, marker: str,
-              original_comment: str = "", c_args: list = None) -> list:
+              original_comment: str = "", c_args: list = None,
+              vf: str = "") -> list:
     container = dst.suffix.lower()
     maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
     tail = []
@@ -441,6 +442,7 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         *maps,
         "-map_metadata", "0",
         "-map_chapters", "0",
+        *(["-vf", vf] if vf else []),
         *video_args(encoder_cfg, crf),
         *(c_args or []),
         *a_args,
@@ -590,7 +592,7 @@ def lossless_args(codec: str = "libx264") -> list:
 
 
 def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
-                out: Path, codec: str = "libx264") -> list:
+                out: Path, codec: str = "libx264", vf: str = "") -> list:
     """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确 seek 微调。
 
     只用精确 seek（-ss 放在 -i 之后）要从文件开头解码，两小时的片子抽三段
@@ -607,15 +609,16 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
         "-i", str(src),
         "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
         "-map", "0:V:0", "-an", "-sn", "-dn",
+        *(["-vf", vf] if vf else []),
         *lossless_args(codec),
         str(out),
     ]
 
 
 def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
-                    out: Path, codec: str = "libx264"):
+                    out: Path, codec: str = "libx264", vf: str = ""):
     rc, _out, err = proc.run_managed(
-        segment_cmd(ffmpeg, src, start, seconds, out, codec))
+        segment_cmd(ffmpeg, src, start, seconds, out, codec, vf))
     if rc != 0:
         raise EncodeError(f"segment extract failed: {err.strip()[-300:]}")
 
@@ -807,7 +810,7 @@ def _probe_crf(tools, refs: list, crf: int, enc_cfg: dict, root: Path,
 def pick_crf_adaptive(tools, src: Path, duration: float,
                       enc_cfg: dict, ad_cfg: dict, log,
                       lossless_codec: str = "libx264",
-                      model: str = "") -> "CrfChoice | None":
+                      model: str = "", vf: str = "") -> "CrfChoice | None":
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
     lo = int(ad_cfg.get("crf_min", 16))
     hi = int(ad_cfg.get("crf_max", 44))
@@ -827,7 +830,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
         for i, start in enumerate(starts):
             ref = root / f"ref{i}.mkv"
             extract_segment(tools.ffmpeg, src, start, span, ref,
-                            lossless_codec)
+                            lossless_codec, vf)
             refs.append(ref)
 
         while hi - lo > step:

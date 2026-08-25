@@ -100,6 +100,7 @@ class VideoInfo:
     duration: float = 0.0
     size: int = 0
     pix_fmt: str = ""
+    field_order: str = ""
     comment: str = ""
     color_primaries: str = ""
     color_transfer: str = ""
@@ -200,6 +201,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
         _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")
+    info.field_order = str(vstream.get("field_order") or "").strip().lower()
     info.color_primaries = _color_tag(vstream.get("color_primaries"))
     info.color_transfer = _color_tag(vstream.get("color_transfer"))
     info.color_space = _color_tag(vstream.get("color_space"))

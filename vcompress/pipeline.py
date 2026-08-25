@@ -11,7 +11,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import encode, files, probe, proc, verify
+from . import analyze, encode, files, probe, proc, verify
 from .progress import ProgressPrinter
 from .results import ResultStore
 from .util import fmt_size
@@ -120,12 +120,18 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
         target = src.with_suffix(ctx.out_ext)
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
-        crf, elapsed = _encode(ctx, src, info, tmp, printer)
+        # 探查源片：交错要反交错、死黑边要裁掉，telecine 直接放弃
+        plan = analyze.analyse(ctx.tools, src, info, ctx.cfg, log)
+        if plan.skip_reason:
+            raise SkipFile(plan.skip_reason)
+
+        crf, elapsed = _encode(ctx, src, info, tmp, printer, plan)
         printer.close()
 
         out_info = probe.probe(ctx.tools, tmp)
         score = verify.run_all(ctx.tools, src, tmp, info, out_info, ctx.cfg,
-                               log=log, lossless_codec=ctx.lossless_codec)
+                               log=log, lossless_codec=ctx.lossless_codec,
+                               plan=plan)
         if score is not None:
             log.info(f"[verify] {src.name}: vmaf {score:.2f}")
 
@@ -146,8 +152,9 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
 
 
 def _encode(ctx: RunContext, src: Path, info, tmp: Path,
-            printer: ProgressPrinter):
+            printer: ProgressPrinter, plan=None):
     """跑主编码，返回 (实际使用的 crf, 耗时秒)。"""
+    plan = plan if plan is not None else analyze.SourcePlan()
     supported = encode.encoder_pix_fmts(ctx.tools.ffmpeg,
                                         ctx.enc_cfg["codec"])
     enc_cfg = encode.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
@@ -156,7 +163,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     if ctx.adaptive_enabled and info.duration > 0:
         picked = encode.pick_crf_adaptive(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
-            ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
+            ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg), plan.vf,
         )
         if picked is not None:
             crf = picked.crf
@@ -169,8 +176,10 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         ctx.marker,
         info.comment,
         encode.color_args(info),
+        plan.vf,
     )
-    log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
+    log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})"
+             + (f" filters: {plan.vf}" if plan.vf else ""))
     printer(0.0)
     t0 = time.monotonic()
     encode.run_encode(cmd, info.duration, printer)
