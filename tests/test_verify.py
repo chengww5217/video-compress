@@ -9,7 +9,57 @@ from pathlib import Path
 import helpers
 from helpers import make_cfg, make_info
 from vcompress import encode, verify
-from vcompress.verify import check_basic
+from vcompress.verify import check_basic, check_color
+
+
+class CheckColorTests(unittest.TestCase):
+    """色彩/HDR 元数据丢失是 VMAF 测不出来的「视觉有损」，必须单独拦。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def hdr_info(self, **kw):
+        base = dict(color_primaries="bt2020", color_transfer="smpte2084",
+                    color_space="bt2020nc", color_range="tv",
+                    hdr_metadata=["content-light-level", "mastering-display"])
+        base.update(kw)
+        return make_info(**base)
+
+    def test_identical_metadata_passes(self):
+        ok, msg = check_color(self.hdr_info(), self.hdr_info(), self.cfg)
+        self.assertTrue(ok, msg)
+
+    def test_lost_transfer_fails(self):
+        out = self.hdr_info(color_transfer="")
+        ok, msg = check_color(self.hdr_info(), out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("transfer smpte2084 -> unset", msg)
+
+    def test_changed_primaries_fails(self):
+        out = self.hdr_info(color_primaries="bt709")
+        ok, msg = check_color(self.hdr_info(), out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("primaries bt2020 -> bt709", msg)
+
+    def test_lost_mastering_display_fails(self):
+        out = self.hdr_info(hdr_metadata=["content-light-level"])
+        ok, msg = check_color(self.hdr_info(), out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("lost mastering-display", msg)
+
+    def test_untagged_source_gaining_defaults_is_fine(self):
+        """源本来没标，编码器补了默认值，不算退化。"""
+        orig = make_info(color_primaries="", color_transfer="",
+                         color_space="", color_range="")
+        out = self.hdr_info(hdr_metadata=[])
+        ok, msg = check_color(orig, out, self.cfg)
+        self.assertTrue(ok, msg)
+
+    def test_can_be_disabled(self):
+        self.cfg["verify"]["color_check"] = False
+        out = self.hdr_info(color_transfer="", hdr_metadata=[])
+        ok, msg = check_color(self.hdr_info(), out, self.cfg)
+        self.assertTrue(ok, msg)
 
 
 class CheckBasicTests(unittest.TestCase):
@@ -145,6 +195,14 @@ class RunAllTests(unittest.TestCase):
             self.run_all()
         self.assertIn("duration mismatch", str(cm.exception))
         self.assertEqual(self.calls, ["decode"])
+
+    def test_color_metadata_loss_stops_before_vmaf(self):
+        self.orig.color_transfer = "smpte2084"
+        self.out_info.color_transfer = ""
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("color metadata changed", str(cm.exception))
+        self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
 
     def test_low_vmaf_is_a_failure(self):
         self.spot = (70.0, "vmaf mean 70.00 below threshold 93.0")

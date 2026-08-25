@@ -63,6 +63,7 @@ DEFAULTS = {
         "decode_check": True,
         "max_duration_diff_s": 0.5,
         "min_actual_saving": 0.05,
+        "color_check": True,
         "vmaf_enabled": True,
         "vmaf_segments": 3,
         "vmaf_sample_seconds": 20,

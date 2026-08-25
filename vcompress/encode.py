@@ -297,9 +297,28 @@ def merge_comment(original: str, marker: str) -> str:
     return f"{original} | {marker}"
 
 
+def color_args(info) -> list:
+    """把源的色彩属性显式写给编码器。
+
+    新一点的 ffmpeg 会自动把这些属性从解码器传到编码器（本机 ffmpeg 9 实测
+    四项和 HDR10 母版信息都能自动带过去），但这依赖构建版本，而丢了它们的后果
+    是 HDR 片源被当成 SDR 播——画面数值一模一样，VMAF 测不出来。显式写一遍是
+    零成本的保险；源没标的项不写，免得凭空造出错误的标记。
+    """
+    args = []
+    for attr, flag in (("color_primaries", "-color_primaries"),
+                       ("color_transfer", "-color_trc"),
+                       ("color_space", "-colorspace"),
+                       ("color_range", "-color_range")):
+        value = getattr(info, attr, "") or ""
+        if value:
+            args += [flag, value]
+    return args
+
+
 def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
               crf: int, a_args: list, s_args: list, marker: str,
-              original_comment: str = "") -> list:
+              original_comment: str = "", c_args: list = None) -> list:
     container = dst.suffix.lower()
     maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
     tail = []
@@ -320,6 +339,7 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         "-map_metadata", "0",
         "-map_chapters", "0",
         *video_args(encoder_cfg, crf),
+        *(c_args or []),
         *a_args,
         *s_args,
         *tail,

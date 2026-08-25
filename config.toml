@@ -58,6 +58,7 @@ opus_kbps = 160
 decode_check = true
 max_duration_diff_s = 0.5
 min_actual_saving = 0.05
+color_check = true
 vmaf_enabled = true
 vmaf_segments = 3
 vmaf_sample_seconds = 20

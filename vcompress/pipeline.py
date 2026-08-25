@@ -156,6 +156,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         encode.subtitle_args(info, ctx.out_ext),
         ctx.marker,
         info.comment,
+        encode.color_args(info),
     )
     log.info(f"[encode] {src.name}: crf={crf} ({ctx.encoder})")
     printer(0.0)

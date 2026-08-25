@@ -1,6 +1,6 @@
-"""产物校验：解码无错、基础属性一致、VMAF 抽检。
+"""产物校验：解码无错、基础属性一致、色彩元数据一致、VMAF 抽检。
 
-对外只需要 run_all()：三步校验的顺序、哪一步失败算硬失败、哪一步不可用只
+对外只需要 run_all()：四步校验的顺序、哪一步失败算硬失败、哪一步不可用只
 告警，都是校验策略的一部分，不该散落在调用方里。
 """
 
@@ -55,6 +55,44 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
     saving = 1.0 - new_size / orig_size
     if saving < min_saving:
         return False, f"saving only {saving:.1%} < {min_saving:.0%}, discarding"
+    return True, ""
+
+
+COLOR_FIELDS = (
+    ("color_primaries", "primaries"),
+    ("color_transfer", "transfer"),
+    ("color_space", "matrix"),
+    ("color_range", "range"),
+)
+
+
+def check_color(orig_info, out_info, cfg):
+    """比对色彩属性与 HDR 母版信息是否原样带过来了。
+
+    这一项不能交给 VMAF：色彩属性和 HDR 母版信息丢失时，解码出来的像素值可以
+    完全不变（VMAF 照样 99 分），但播放器不知道这是 BT.2020/PQ，会按 SDR 显示，
+    画面发灰。逐帧比对压根测不到这种「视觉有损」。
+
+    只在源确实标了某项时才要求产物一致：源本来就没标（unknown）而编码器补了个
+    默认值，不算退化。
+    """
+    if not cfg["verify"].get("color_check", True):
+        return True, ""
+    problems = []
+    for attr, label in COLOR_FIELDS:
+        before = getattr(orig_info, attr, "") or ""
+        after = getattr(out_info, attr, "") or ""
+        if not before:
+            continue
+        if after != before:
+            problems.append(f"{label} {before} -> {after or 'unset'}")
+    before_hdr = set(getattr(orig_info, "hdr_metadata", ()) or ())
+    after_hdr = set(getattr(out_info, "hdr_metadata", ()) or ())
+    lost = sorted(before_hdr - after_hdr)
+    if lost:
+        problems.append("lost " + ", ".join(lost))
+    if problems:
+        return False, "color metadata changed: " + "; ".join(problems)
     return True, ""
 
 
@@ -143,7 +181,8 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             log=None, lossless_codec: str = "libx264"):
     """跑完整校验链，任何硬失败抛 VerifyError；返回 VMAF 均值（可能为 None）。
 
-    顺序是刻意的：先做便宜的（解码、时长、体积），最后才做最贵的 VMAF 抽检。
+    顺序是刻意的：先做便宜的（解码、时长、体积、色彩元数据），最后才做最贵的
+    VMAF 抽检。
     """
     if cfg["verify"].get("decode_check", True):
         errs = decode_errors(tools.ffmpeg, out)
@@ -152,6 +191,10 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
 
     ok, msg = check_basic(orig_info, out_info, orig_info.size,
                           out.stat().st_size, cfg)
+    if not ok:
+        raise VerifyError(msg)
+
+    ok, msg = check_color(orig_info, out_info, cfg)
     if not ok:
         raise VerifyError(msg)
 

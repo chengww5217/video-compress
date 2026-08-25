@@ -6,8 +6,37 @@ import unittest
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.probe import _parse_fps, _stream_bitrate, should_skip
+from vcompress.probe import (_color_tag, _hdr_markers, _parse_fps,
+                             _stream_bitrate, should_skip)
 from vcompress.util import to_int as _to_int
+
+
+class ColorMetadataTests(unittest.TestCase):
+    def test_color_tag_normalises(self):
+        self.assertEqual(_color_tag("BT2020"), "bt2020")
+        self.assertEqual(_color_tag(" smpte2084 "), "smpte2084")
+
+    def test_color_tag_treats_unknown_as_missing(self):
+        for value in ("unknown", "unspecified", "reserved", "N/A", "", None):
+            self.assertEqual(_color_tag(value), "", repr(value))
+
+    def test_hdr_markers_from_stream_and_frame(self):
+        stream = [{"side_data_type": "Content light level metadata"}]
+        frame = [{"side_data_type": "Mastering display metadata"},
+                 {"side_data_type": "H.26[45] User Data Unregistered SEI message"}]
+        self.assertEqual(_hdr_markers(stream, frame),
+                         ["content-light-level", "mastering-display"])
+
+    def test_hdr_markers_deduplicates(self):
+        entry = [{"side_data_type": "Mastering display metadata"}]
+        self.assertEqual(_hdr_markers(entry, entry), ["mastering-display"])
+
+    def test_hdr_markers_tolerates_junk(self):
+        self.assertEqual(_hdr_markers(None, [], ["not-a-dict"], [{}]), [])
+
+    def test_dolby_vision_recognised(self):
+        self.assertEqual(_hdr_markers([{"side_data_type": "Dolby Vision RPU Data"}]),
+                         ["dolby-vision"])
 
 
 class ParseHelperTests(unittest.TestCase):

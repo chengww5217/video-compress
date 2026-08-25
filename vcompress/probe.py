@@ -26,6 +26,22 @@ CODEC_FAMILY = {
     "wmv3": "wmv3",
 }
 
+# ffprobe 报出来的 side data 名字 -> 我们关心的短名。只认这几种：它们丢了
+# 画面数值可能一模一样（VMAF 照样 99 分），但播放器少了峰值亮度/母版信息，
+# HDR 会被错误地当成 SDR 显示。其余 side data（各种 SEI）不影响观感，忽略。
+HDR_SIDE_DATA = {
+    "mastering display metadata": "mastering-display",
+    "content light level metadata": "content-light-level",
+    "dolby vision rpu data": "dolby-vision",
+    "dolby vision metadata": "dolby-vision",
+    "dolby vision configuration record": "dolby-vision",
+    "hdr dynamic metadata smpte2094-40 (hdr10+)": "hdr10plus",
+    "hdr dynamic metadata smpte2094-40": "hdr10plus",
+}
+
+# ffprobe 对「没标」的写法不止一种，都当作源没提供这项信息
+UNSPECIFIED_COLOR = {"", "unknown", "unspecified", "reserved", "n/a"}
+
 if sys.platform == "win32":
     _FALLBACK_DIRS = (r"C:\Program Files\ffmpeg\bin", r"C:\Program Files\ffmpeg")
 else:
@@ -85,6 +101,11 @@ class VideoInfo:
     size: int = 0
     pix_fmt: str = ""
     comment: str = ""
+    color_primaries: str = ""
+    color_transfer: str = ""
+    color_space: str = ""
+    color_range: str = ""
+    hdr_metadata: list = field(default_factory=list)
     audio_codecs: list = field(default_factory=list)
     audio_bitrates: list = field(default_factory=list)
     audio_channels: list = field(default_factory=list)
@@ -120,12 +141,39 @@ def _stream_bitrate(stream: dict) -> int:
     return to_int(stream.get("bit_rate")) or to_int(bps)
 
 
+def _color_tag(value) -> str:
+    """规范化色彩属性值；没标的一律返回空串。"""
+    text = str(value or "").strip().lower()
+    return "" if text in UNSPECIFIED_COLOR else text
+
+
+def _hdr_markers(*side_data_lists) -> list:
+    """从若干 side_data_list 里挑出我们关心的 HDR 标记，去重后排序。
+
+    HDR10 的母版信息在有些容器里是流级 side data，在有些片源里只以帧内 SEI
+    的形式存在（x265 写的就是后者），所以两边都要看。
+    """
+    found = set()
+    for entries in side_data_lists:
+        for entry in entries or ():
+            if not isinstance(entry, dict):
+                continue
+            name = str(entry.get("side_data_type") or "").strip().lower()
+            marker = HDR_SIDE_DATA.get(name)
+            if marker:
+                found.add(marker)
+    return sorted(found)
+
+
 def probe(tools: Tools, path: Path) -> VideoInfo:
     cmd = [
         tools.ffprobe,
         "-v", "error",
         "-show_format",
         "-show_streams",
+        # 只读第一帧：HDR 母版信息可能只存在于帧内 SEI，不看帧就看不到它
+        "-show_frames",
+        "-read_intervals", "%+#1",
         "-of", "json",
         str(path),
     ]
@@ -152,6 +200,14 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
         _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")
+    info.color_primaries = _color_tag(vstream.get("color_primaries"))
+    info.color_transfer = _color_tag(vstream.get("color_transfer"))
+    info.color_space = _color_tag(vstream.get("color_space"))
+    info.color_range = _color_tag(vstream.get("color_range"))
+    vframe = next((f for f in data.get("frames") or []
+                   if f.get("media_type") == "video"), {})
+    info.hdr_metadata = _hdr_markers(vstream.get("side_data_list"),
+                                     vframe.get("side_data_list"))
     info.bitrate = _stream_bitrate(vstream)
     info.container_bitrate = to_int(fmt.get("bit_rate"))
     info.duration = to_float(fmt.get("duration")) or \
