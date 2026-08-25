@@ -22,6 +22,9 @@ DEFAULTS = {
         "extensions": [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts",
                        ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"],
         "tag_marker": "vcompress",
+        # 交错源（DVD / 电视台 rip）直接跳过：压过去会丢掉交错标记，属于
+        # VMAF 测不出来的视觉有损。写 false 表示照压（自己清楚后果）
+        "skip_interlaced": True,
         "bpp": {
             "h264": 0.05, "hevc": 0.03, "vp9": 0.03, "av1": 0.02,
             "mpeg2video": 0.12, "mpeg4": 0.08,

@@ -38,6 +38,7 @@ def make_info(**kw):
         duration=600.0,
         size=500_000_000,
         pix_fmt="yuv420p",
+        field_order="progressive",
         comment="",
         color_primaries="bt709",
         color_transfer="bt709",

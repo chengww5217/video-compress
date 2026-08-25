@@ -42,6 +42,10 @@ HDR_SIDE_DATA = {
 # ffprobe 对「没标」的写法不止一种，都当作源没提供这项信息
 UNSPECIFIED_COLOR = {"", "unknown", "unspecified", "reserved", "n/a"}
 
+# field_order 的这几个值表示真交错（顶场优先/底场优先及其两种存储顺序）。
+# progressive、unknown 以及压根没这个字段的都按渐进处理——绝大多数文件不标它。
+INTERLACED_FIELD_ORDERS = {"tt", "bb", "tb", "bt"}
+
 if sys.platform == "win32":
     _FALLBACK_DIRS = (r"C:\Program Files\ffmpeg\bin", r"C:\Program Files\ffmpeg")
 else:
@@ -100,6 +104,7 @@ class VideoInfo:
     duration: float = 0.0
     size: int = 0
     pix_fmt: str = ""
+    field_order: str = ""
     comment: str = ""
     color_primaries: str = ""
     color_transfer: str = ""
@@ -120,6 +125,10 @@ class VideoInfo:
             rest = self.container_bitrate - audio
             return rest if rest > 0 else self.container_bitrate
         return 0
+
+    @property
+    def interlaced(self) -> bool:
+        return self.field_order in INTERLACED_FIELD_ORDERS
 
 
 def _parse_fps(rate: str) -> float:
@@ -200,6 +209,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
         _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")
+    info.field_order = str(vstream.get("field_order") or "").strip().lower()
     info.color_primaries = _color_tag(vstream.get("color_primaries"))
     info.color_transfer = _color_tag(vstream.get("color_transfer"))
     info.color_space = _color_tag(vstream.get("color_space"))
@@ -233,6 +243,16 @@ def should_skip(info: VideoInfo, cfg: dict):
     marker = str(cfg["skip"].get("tag_marker", "vcompress"))
     if marker and marker.lower() in (info.comment or "").lower():
         return True, f"already processed by {marker}"
+
+    # 交错源：像素能原样压过去，但容器的交错标记压根传不过去（AV1 没有交错
+    # 信号），播放器从此不再反交错，梳齿就留在画面上了。这是 VMAF 测不出来的
+    # 视觉有损，和色彩元数据丢失同一类，所以不能压——更不能压完删掉原文件。
+    # 反交错属于「动画面」，不在本工具范围内，唯一正确的处置就是不碰。
+    if cfg["skip"].get("skip_interlaced", True) and info.interlaced:
+        return True, (
+            f"interlaced source (field_order={info.field_order}); compressing "
+            f"it would drop the interlace flag and disable deinterlacing"
+        )
 
     min_size = int(cfg["skip"].get("min_size_mb", 0)) * 1024 * 1024
     if info.size and info.size < min_size:

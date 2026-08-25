@@ -173,6 +173,42 @@ class ShouldSkipTests(unittest.TestCase):
         self.assertIn("bits/pixel", reason)
 
 
+class InterlacedTests(unittest.TestCase):
+    """交错源必须跳过：压过去会丢交错标记，而这是 VMAF 测不出来的视觉有损。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def test_interlaced_source_skips(self):
+        for order in ("tt", "bb", "tb", "bt"):
+            skip, reason = should_skip(make_info(field_order=order), self.cfg)
+            self.assertTrue(skip, order)
+            self.assertIn("interlaced", reason)
+            self.assertIn(order, reason)
+
+    def test_progressive_source_is_processed(self):
+        for order in ("progressive", "unknown", ""):
+            skip, reason = should_skip(make_info(field_order=order), self.cfg)
+            self.assertFalse(skip, f"{order!r}: {reason}")
+
+    def test_interlace_check_can_be_turned_off(self):
+        self.cfg["skip"]["skip_interlaced"] = False
+        skip, reason = should_skip(make_info(field_order="tt"), self.cfg)
+        self.assertFalse(skip, reason)
+
+    def test_the_gate_runs_before_the_expensive_ones(self):
+        """交错的判断不该被别的跳过原因掩盖，它的理由信息量最大。"""
+        info = make_info(field_order="tt", bitrate=1_000)
+        _skip, reason = should_skip(info, self.cfg)
+        self.assertIn("interlaced", reason)
+
+    def test_interlaced_property(self):
+        self.assertTrue(make_info(field_order="bt").interlaced)
+        self.assertFalse(make_info(field_order="progressive").interlaced)
+        # 大小写在探测时就规范化了，这里只认小写
+        self.assertFalse(make_info(field_order="BT").interlaced)
+
+
 if __name__ == "__main__":
     unittest.main()
 
