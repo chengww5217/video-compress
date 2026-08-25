@@ -10,9 +10,9 @@
                 ▼
       自适应 CRF 搜索（抽样 + VMAF 二分）
                 ▼
-      编码到 <名字>.tmp.mkv
+      编码到 <源文件名>.tmp.mkv
                 ▼
-      校验：全量解码 / 时长 / 流数量 / 体积 / VMAF 抽检
+      校验：全量解码 / 时长 / 分辨率 / 流数量 / 体积 / VMAF 抽检
                 │通过                    │失败
                 ▼                        ▼
       替换并删除原文件          删除临时文件，保留原件，记录日志
@@ -20,20 +20,20 @@
 
 防重复压缩的三道保险：
 
-1. 已处理文件会写入 `COMMENT=<tag_marker>-v1` 元数据标记（默认 `vcompress-v1`），再次遇到直接跳过；标记名跟着 `[skip].tag_marker` 走，改配置检测也随之变化；
+1. 已处理文件会写入 `COMMENT=<tag_marker>-v1` 元数据标记（默认 `vcompress-v1`），再次遇到直接跳过；标记名跟着 `[skip].tag_marker` 走，改配置检测也随之变化。原有的 comment 会被保留，标记追加在后面（`原注释 | vcompress-v1`）；
 2. 按编码器与「每像素码率」（BPP = 视频轨码率 ÷ 宽 × 高 × 帧率）判断是否已压到位。只算视频轨，容器没给就用总码率扣掉音轨估算，避免肥音轨把判断带偏；
 3. 预估收益低于 `min_saving_ratio`（默认 15%）的不压；实际收益低于 5% 的丢弃结果、保留原件。
 
-另外 `logs/results.jsonl` 会记录每次运行结果，重跑时自动跳过上次已成功的文件。
+另外 `logs/results.jsonl` 会记录每次运行结果，重跑时自动跳过上次已成功的文件。跳过前会比对体积：同名文件被换成另一个片源时旧记录不再生效，会重新检查。
 
 ## 环境要求
 
 | 组件 | 要求 | 说明 |
 |---|---|---|
-| 操作系统 | Windows 10/11 | 其他平台理论可用，未测试 |
+| 操作系统 | Windows / macOS / Linux | 主要在 Windows 与 macOS 上使用 |
 | Python | ≥ 3.11 | 仅用标准库（需内置 `tomllib`） |
-| ffmpeg / ffprobe | 需含 `libsvtav1`、`libx265` | 建议同时带 `libvmaf` 和 `libx264`（自适应 CRF 与 VMAF 抽检依赖它们抽取无损样本片段） |
-| Send2Trash（可选） | `pip install Send2Trash` | 使用 `--recycle` 回收站模式时需要；未安装时会退化为直接删除 |
+| ffmpeg / ffprobe | 需含 `libsvtav1`、`libx265` | 建议同时带 `libvmaf` 和 `libx264`（自适应 CRF 与 VMAF 抽检依赖它们抽取无损样本片段；没有 libx264 会自动退回 ffv1，只是临时文件更大） |
+| Send2Trash（可选） | `pip install "vcompress[recycle]"` | 使用 `--recycle` 回收站模式时需要；未安装时会退化为直接删除 |
 
 启动时会自检一次 ffmpeg 构建能力：选定的视频编码器不存在就直接退出、不动任何文件；缺 `libvmaf`/`libx264`/`libopus` 只告警并说明会退化成什么行为。
 
@@ -41,11 +41,11 @@
 
 已安装的可跳过。脚本按以下顺序自动查找：
 
-1. `config.toml` 中 `[tools]` 手动指定的路径
+1. `config.toml` 中 `[tools]` 手动指定的路径（**指定了但找不到会直接报错**，不会悄悄改用别的 ffmpeg）
 2. 系统 `PATH`
-3. `C:\Program Files\ffmpeg\bin`
+3. 平台常见目录（Windows：`C:\Program Files\ffmpeg\bin`；macOS/Linux：`/opt/homebrew/bin`、`/usr/local/bin`、`/usr/bin`）
 
-可从 https://www.gyan.dev/ffmpeg/builds/ 下载 **full** 构建并解压到上述目录（或自行指定路径）。验证构建是否满足要求：
+Windows 可从 https://www.gyan.dev/ffmpeg/builds/ 下载 **full** 构建；macOS 用 `brew install ffmpeg`。验证构建是否满足要求：
 
 ```powershell
 ffmpeg -hide_banner -encoders | findstr "svtav1 x265"
@@ -68,6 +68,15 @@ python -m vcompress "D:\movies\a.mkv" "D:\movies\b.mp4"
 python -m vcompress D:\videos --keep
 ```
 
+也可以装成命令用：
+
+```bash
+pip install .              # 或 pip install ".[recycle]"
+vcompress ~/videos --dry-run
+```
+
+装成命令后如果找不到 `config.toml`，会使用代码内置的默认配置，日志与记录写到**当前工作目录**下的 `logs/`。
+
 > 新安装 Python 后需**重开终端**才能使用 `python` 命令。
 
 ## 命令行参数
@@ -77,17 +86,17 @@ python -m vcompress D:\videos --keep
 | `paths...` | 要处理的视频文件或目录（至少一个） |
 | `--dry-run` | 只分析并打印将要执行的操作，不改任何文件 |
 | `--no-recursive` | 不递归子目录 |
-| `--encoder av1\|x265` | 临时覆盖配置中的编码器 |
+| `--encoder 名字` | 临时覆盖配置中的编码器；名字必须有对应的 `[encode.<名字>]` 配置节 |
 | `--no-adaptive` | 关闭自适应 CRF，直接用固定 CRF |
 | `--workers N` | 并发处理的文件数（默认 1；单文件编码本身已是多线程）。真正并发时没有实时进度条，只保留各阶段日志；只有一个待处理文件时仍然串行执行并显示进度条 |
 | `--force` | 忽略 `results.jsonl` 缓存，重新处理所有文件（元数据标记仍生效） |
 | `--recycle` | 删除原文件时进回收站而不是直接删除 |
 | `--keep` | 只生成压缩副本、不删原文件 |
-| `--config 路径` | 指定配置文件（默认同目录下 `config.toml`） |
+| `--config 路径` | 指定配置文件（默认同目录下 `config.toml`；显式指定但文件不存在会报错退出） |
 
-退出码：`0` 全部成功；`1` 存在失败；`130` 被 Ctrl+C 中断。
+退出码：`0` 全部成功；`1` 存在失败；`2` 配置或环境有问题（没跑任何编码）；`130` 被 Ctrl+C 中断。
 
-中断是安全的：Ctrl+C 会立刻终止所有 ffmpeg 子进程（并发模式也一样）、删掉半成品临时文件，原文件不受影响。漏下的临时文件会在下次处理同一个文件时清掉。
+中断是安全的：Ctrl+C 会立刻终止所有 ffmpeg 子进程、删掉半成品临时文件，原文件不受影响。串行和并发两种模式都一样。漏下的临时文件会在下次处理同一个文件时清掉。
 
 ### 输出命名与覆盖保护
 
@@ -96,11 +105,19 @@ python -m vcompress D:\videos --keep
 - 常规情况 `a.mp4` → `a.mkv`，校验通过后才删除 `a.mp4`；`a.mkv` → 原地替换
 - 目标名已经被**另一个文件**占用时，输出改名为 `a.<编码器><扩展名>`（如 `a.av1.mkv`）并打一条警告，绝不覆盖已有文件
 - 连改名后的名字也被占用，这个文件直接报错跳过
-- `--keep` 下输出与原文件同名，因此总是走改名规则
+- `--keep` 下输出不会指向原文件；同名时走上面的改名规则
 
-名字冲突在编码开始前就会判定，不会白跑几小时才失败。
+名字冲突在编码开始前就会判定，不会白跑几小时才失败。并发模式下输出名会在内存里预留：同目录的 `a.mp4` 和 `a.avi` 都想产出 `a.mkv` 时，第二个自动让位到 `a.av1.mkv`，两个 worker 不会抢同一个名字。
+
+临时文件名是 `<源文件完整名>.tmp<扩展名>`（如 `a.mp4.tmp.mkv`）。带上源文件的扩展名是必要的：只用主干名的话 `a.mp4` 和 `a.avi` 会共用一个 `a.tmp.mkv`，并发时两个 ffmpeg 往同一个文件写。
 
 ## 配置说明（config.toml）
+
+所有默认值都内置在代码里（`vcompress/config.py` 的 `DEFAULTS`），`config.toml` 只是覆盖层：
+
+- 少写一个配置节不会出错，缺的部分用默认值补齐；
+- **写错键名会直接报错并指出是哪一个**（比如把 `min_saving_ratio` 打成 `min_saving_ration`），不会被静默忽略；
+- 取值范围也会校验（比例必须在 0~1、`crf_min < crf_max`、`workers ≥ 1` 等）。
 
 ### 编码器选择 `[encode]`
 
@@ -108,6 +125,10 @@ python -m vcompress D:\videos --keep
 - `x265`：libx265 `-preset placebo -crf 20`，兼容性更好，速度慢
 
 两者都是"最慢=最小"的极限档位。preset 只影响压缩效率不影响画质，无需按片源调整。
+
+想加第三个编码器，直接加一节 `[encode.vp9]`（至少给 `codec`/`preset`/`crf`），`--encoder vp9` 就能用，不需要改代码。
+
+**像素格式**会自动适配：libsvtav1 只接受 4:2:0，遇到 4:2:2/4:4:4 的源（ProRes、部分 mov/avi）会自动降到同位深的 4:2:0 并打一条警告——不做这件事的话整个文件会直接编码失败。支持的格式是运行时问 ffmpeg 拿到的，不是硬编码表。需要手动控制可以在编码器节里写 `pix_fmt = "yuv420p10le"`。
 
 ### 自适应 CRF `[adaptive]`
 
@@ -139,49 +160,63 @@ Opus 码率以 `opus_kbps`(160k) 作为**立体声**基准按声道数缩放：�
 |---|---|---|
 | 全量解码无报错 | 开 | 放弃输出 |
 | 时长偏差 ≤ 0.5s | 是 | 放弃输出 |
+| 分辨率与原文件一致 | 是 | 放弃输出 |
 | 音轨、字幕条数与原文件一致 | 是 | 放弃输出 |
 | 输出必须更小且省 ≥ 5% | 是 | 保留原件 |
 | VMAF 抽检 3 段均值 ≥ 93 | 开 | 保留原件 |
 
-任何一项不过都会删除临时文件并保留原文件，不会出现"压坏了还删了原件"的情况。ffmpeg 构建里没有 libvmaf 时抽检会跳过并打警告，其余检查照常执行。
+检查按「先便宜后昂贵」的顺序跑：解码、时长、体积都过了才会去做最贵的 VMAF 抽检。任何一项不过都会删除临时文件并保留原文件，不会出现"压坏了还删了原件"的情况。ffmpeg 构建里没有 libvmaf 时抽检会跳过并打警告，其余检查照常执行。
 
 VMAF 抽检是逐帧比对，参考段和待测段错一帧分数就会崩到 30~60 分（画质其实没问题）。为此抽样切点会自动挪到两帧中间：同一帧的时间戳在 mp4（1/24000）和 mkv（1/1000）里精度不同，切点压在帧边界上时两边会一边留、一边丢，整段就错开了。万一还是错了帧（VFR 等异常片源），前后各挪一帧复核，分数能回到正常水平就按对齐后的分数算，并在日志里说明。失败信息会带上每段的位置（如 `53.05@4490s`）方便自己去那个时间点看一眼。
 
-`keep_failed_output = true` 可以在校验没过时把产物留成 `<名字>.failed.mkv` 而不是直接删掉——几小时的编码结果值得先自己看一眼再决定。原文件始终不动；这个名字已被占用时不覆盖，仍然丢弃产物。
+`keep_failed_output = true` 可以在校验没过时把产物留成 `<源文件名>.failed.mkv` 而不是直接删掉——几小时的编码结果值得先自己看一眼再决定。原文件始终不动；这个名字已被占用时不覆盖，仍然丢弃产物。被中断（Ctrl+C）时不会留 `.failed`，那不是校验失败。
 
 `--keep` 也可在配置中设为默认：在 `[run]` 节加 `keep_original = true`。
 
 ## 日志与记录
 
-- `logs/vcompress.log`：完整日志（DEBUG 级，含每次 VMAF 探测值）
+- `logs/vcompress.log`：完整日志（DEBUG 级，含每次 VMAF 探测值），按 `log_max_bytes`（默认 5 MB）轮转，保留 `log_backups`（默认 3）份
 - `logs/results.jsonl`：每个文件一行 JSON 的处理记录，用于断点续跑和统计
 
-`[run]` 里这两个路径写相对路径时，按 **配置文件所在目录** 解析（不是当前工作目录），所以从任何目录运行都读写同一份记录；写绝对路径或 `~/...` 也支持。
+`[run]` 里这两个路径写相对路径时，按 **配置文件所在目录** 解析（不是当前工作目录），所以从任何目录运行都读写同一份记录；写绝对路径或 `~/...` 也支持。没有配置文件时（打包安装且未提供 `config.toml`）按当前工作目录解析。
+
+每次运行结束会打印本次和累计省下的空间。
 
 ## 项目结构
 
 ```
 video-compress/
-├── config.toml          # 配置文件
-├── vcompress/           # 主包
+├── config.toml          # 配置覆盖层（可选，默认值在 config.py 里）
+├── pyproject.toml       # 打包与 vcompress 命令入口
+├── vcompress/
 │   ├── __main__.py      # 入口（python -m vcompress）
-│   ├── cli.py           # 命令行解析、调度、输出命名与覆盖保护
+│   ├── cli.py           # 参数解析、构建自检、调度与汇总
+│   ├── config.py        # 内置默认值、深合并、配置校验
+│   ├── pipeline.py      # 单文件流程（探测→编码→校验→落地）与运行上下文
 │   ├── probe.py         # ffprobe 探测与跳过判定
-│   ├── encode.py        # 编码参数生成与执行、抽样、自适应 CRF
-│   └── verify.py        # 解码校验、流数量比对与 VMAF 抽检
+│   ├── encode.py        # 编码参数生成与执行、抽样、自适应 CRF、像素格式适配
+│   ├── verify.py        # 解码校验、基础比对、VMAF 抽检与校验链编排
+│   ├── files.py         # 文件发现、命名规则、输出名预留、删除策略
+│   ├── results.py       # results.jsonl 读写与缓存新鲜度判断
+│   ├── progress.py      # 单行进度渲染
+│   ├── proc.py          # 子进程注册表与取消（Ctrl+C 时统一杀干净）
+│   └── util.py          # 类型宽松转换与格式化
 └── tests/               # 测试（unittest）
     ├── helpers.py           # 配置与 VideoInfo 替身
-    ├── test_config.py       # 随包配置与代码读取结构的一致性
+    ├── test_config.py       # 默认值/配置文件一致性与校验行为
     ├── test_probe.py        # 码率估算与跳过判定
-    ├── test_encode.py       # 参数生成、构建能力探测、子进程行为
-    ├── test_verify.py       # 校验与 VMAF 判定
-    ├── test_cli.py          # 输出命名、路径解析、临时文件清理
+    ├── test_encode.py       # 参数生成、进度解析、像素格式、构建能力
+    ├── test_verify.py       # 校验链、VMAF 判定
+    ├── test_files.py        # 命名、扫描、输出名并发预留
+    ├── test_results.py      # 记录存储与缓存新鲜度
+    ├── test_pipeline.py     # 流程编排：中断/失败清理、落地行为
+    ├── test_cli.py          # 参数解析、自检、日志轮转、调度选择
     └── test_integration.py  # 真实 ffmpeg 端到端（缺 ffmpeg 自动跳过）
 ```
 
 ## 开发与测试
 
-```powershell
+```bash
 # 运行全部测试（单元测试无需 ffmpeg；集成测试缺 ffmpeg 时自动跳过）
 python -m unittest discover -s tests -v
 
@@ -202,3 +237,6 @@ python -m unittest tests.test_integration -v
 
 **Q：如何强制重新压缩已处理过的文件？**
 `--force` 只忽略 `results.jsonl` 缓存，元数据标记依然生效。要连标记一起绕过，把 `[skip].tag_marker` 改成另一个值（检测跟着配置走），必要时再清空 `expected_ratio`/`bpp` 两张表。
+
+**Q：启动就报 `unknown option [skip] xxx` 怎么办？**
+配置里有代码不认识的键，通常是拼写错误。报错信息里的键名就是问题所在；确认拼写或删掉该行即可。
