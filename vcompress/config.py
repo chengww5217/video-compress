@@ -69,6 +69,7 @@ DEFAULTS = {
         "vmaf_sample_seconds": 20,
         "vmaf_threshold": 93.0,
         "vmaf_min_segment": 90.0,
+        "vmaf_4k_model": True,
         "keep_failed_output": False,
     },
     "run": {

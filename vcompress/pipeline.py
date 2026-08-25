@@ -145,7 +145,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     if ctx.adaptive_enabled and info.duration > 0:
         picked = encode.pick_crf_adaptive(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
-            ctx.lossless_codec,
+            ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
         )
         if picked is not None:
             crf = picked

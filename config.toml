@@ -64,6 +64,7 @@ vmaf_segments = 3
 vmaf_sample_seconds = 20
 vmaf_threshold = 93.0
 vmaf_min_segment = 90.0
+vmaf_4k_model = true
 keep_failed_output = false
 
 [run]

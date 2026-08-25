@@ -412,6 +412,34 @@ class FrameAlignedStartTests(unittest.TestCase):
         self.assertEqual(encode.frame_aligned_start(-5.0, self.FPS), 0.0)
 
 
+class VmafModelTests(unittest.TestCase):
+    """默认模型按 1080p 观看条件训练，4K 片源用它是错的量具。"""
+
+    def test_1080p_uses_the_default_model(self):
+        self.assertEqual(encode.vmaf_model_for(1920, 1080), "")
+
+    def test_1440p_still_uses_the_default_model(self):
+        self.assertEqual(encode.vmaf_model_for(2560, 1440), "")
+
+    def test_4k_switches_model(self):
+        self.assertEqual(encode.vmaf_model_for(3840, 2160), encode.VMAF_MODEL_4K)
+
+    def test_vertical_4k_switches_too(self):
+        self.assertEqual(encode.vmaf_model_for(2160, 3840), encode.VMAF_MODEL_4K)
+
+    def test_can_be_disabled(self):
+        self.assertEqual(encode.vmaf_model_for(3840, 2160, False), "")
+
+    def test_unknown_resolution_is_safe(self):
+        self.assertEqual(encode.vmaf_model_for(0, 0), "")
+        self.assertEqual(encode.vmaf_model_for(None, None), "")
+
+    def test_model_goes_into_the_filter_chain(self):
+        self.assertIn(f"model=version={encode.VMAF_MODEL_4K}",
+                      encode.vmaf_lavfi(0, encode.VMAF_MODEL_4K))
+        self.assertNotIn("model=", encode.vmaf_lavfi())
+
+
 class VmafLavfiTests(unittest.TestCase):
     def test_both_inputs_are_renumbered_by_frame(self):
         lavfi = encode.vmaf_lavfi()

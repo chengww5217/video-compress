@@ -96,25 +96,38 @@ def check_color(orig_info, out_info, cfg):
     return True, ""
 
 
+def vmaf_model(info, cfg) -> str:
+    """按片源分辨率选 VMAF 模型。
+
+    自适应搜索和这里的抽检必须用同一把尺子，所以模型选择只有一个开关
+    （[verify] vmaf_4k_model），搜索那边也读它。
+    """
+    return encode.vmaf_model_for(
+        getattr(info, "width", 0), getattr(info, "height", 0),
+        bool(cfg["verify"].get("vmaf_4k_model", True)),
+    )
+
+
 def _fmt_segments(records) -> str:
     return ", ".join(f"{s:.2f}@{t:.0f}s" for t, s in records)
 
 
 def _score_segment(tools, ref: Path, dist: Path, threshold: float,
-                   index: int, start: float, log=None) -> float:
+                   index: int, start: float, log=None, model: str = "") -> float:
     """量一段的 VMAF；分数异常低时先确认不是错帧量出来的假警报。
 
     抽段边界、VFR 片源、时间戳精度都可能让参考段和待测段差一帧，逐帧比
     出来的分数会崩到 30~60。前后各挪一帧再量，如果分数立刻回到正常水平，
     说明是对齐问题而不是画质问题，取对齐后的分数。
     """
-    score = encode.vmaf_score(tools.ffmpeg, dist, ref)
+    score = encode.vmaf_score(tools.ffmpeg, dist, ref, model=model, log=log)
     if score >= threshold:
         return score
     best, best_shift = score, 0
     for shift in (1, -1):
         try:
-            alt = encode.vmaf_score(tools.ffmpeg, dist, ref, shift)
+            alt = encode.vmaf_score(tools.ffmpeg, dist, ref, shift,
+                                    model=model, log=log)
         except encode.EncodeError:
             continue
         if alt > best:
@@ -130,7 +143,7 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
 
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     cfg, log=None, fps: float = 0.0,
-                    lossless_codec: str = "libx264"):
+                    lossless_codec: str = "libx264", model: str = ""):
     vcfg = cfg["verify"]
     if not vcfg.get("vmaf_enabled", True):
         return None, ""
@@ -160,7 +173,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                 encode.extract_segment(tools.ffmpeg, compressed, start,
                                        seconds, dist, lossless_codec)
                 score = _score_segment(tools, ref, dist, threshold, i + 1,
-                                       start, log)
+                                       start, log, model)
                 if log:
                     log.debug(f"vmaf segment {i + 1} at {start:.1f}s: {score:.2f}")
                 records.append((start, score))
@@ -209,7 +222,8 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
 
     score, msg = vmaf_spot_check(tools, src, out, orig_info.duration, cfg,
                                  log=log, fps=orig_info.fps,
-                                 lossless_codec=lossless_codec)
+                                 lossless_codec=lossless_codec,
+                                 model=vmaf_model(orig_info, cfg))
     if msg and score is None:
         # 构建里没有 libvmaf 之类的环境问题：告警但不否决，其余检查已经过了
         if log:

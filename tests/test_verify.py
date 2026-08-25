@@ -219,6 +219,24 @@ class RunAllTests(unittest.TestCase):
         self.assertIsNone(self.run_all())
 
 
+class VmafModelSelectionTests(unittest.TestCase):
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def test_4k_source_gets_the_4k_model(self):
+        info = make_info(width=3840, height=2160)
+        self.assertEqual(verify.vmaf_model(info, self.cfg),
+                         encode.VMAF_MODEL_4K)
+
+    def test_1080p_source_gets_the_default(self):
+        self.assertEqual(verify.vmaf_model(make_info(), self.cfg), "")
+
+    def test_switch_can_be_turned_off(self):
+        self.cfg["verify"]["vmaf_4k_model"] = False
+        info = make_info(width=3840, height=2160)
+        self.assertEqual(verify.vmaf_model(info, self.cfg), "")
+
+
 class VmafSpotCheckTests(unittest.TestCase):
     """用替身挡掉 ffmpeg，只验证参数处理与结果判定。"""
 
@@ -235,7 +253,7 @@ class VmafSpotCheckTests(unittest.TestCase):
             self.extracted.append((Path(src).name, round(start, 3)))
         encode.vmaf_score = self.fake_score
 
-    def fake_score(self, ff, dist, ref, shift=0):
+    def fake_score(self, ff, dist, ref, shift=0, **kw):
         self.shifts.append(shift)
         return self.scores[len(self.extracted) // 2 - 1]
 
@@ -305,7 +323,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.assertEqual(self.extracted, [])
 
     def test_ffmpeg_failure_is_surfaced_not_raised(self):
-        def boom(*a):
+        def boom(*a, **kw):
             raise encode.EncodeError("libvmaf failed: no such filter")
 
         encode.vmaf_score = boom
@@ -336,7 +354,7 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_low_segment_is_rechecked_for_a_frame_offset(self):
         """错帧量出来的低分不该判死刑：挪一帧还原后按真实分数算。"""
-        def score(ff, dist, ref, shift=0):
+        def score(ff, dist, ref, shift=0, **kw):
             self.shifts.append(shift)
             return 95.0 if shift else 40.0
 
@@ -348,7 +366,7 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_genuinely_bad_segment_still_fails(self):
         """挪帧也救不回来的低分说明画质真的坏了，必须照旧判失败。"""
-        encode.vmaf_score = lambda ff, dist, ref, shift=0: 70.0
+        encode.vmaf_score = lambda ff, dist, ref, shift=0, **kw: 70.0
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 70.0)
         self.assertIn("70.00", msg)

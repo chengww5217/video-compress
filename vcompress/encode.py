@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import proc
-from .util import to_float
+from .util import to_float, to_int
 
 _NAME_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.\-]*")
 _DEPTH_RE = re.compile(r"(\d{1,2})(?:[lb]e)?$")
@@ -530,6 +530,23 @@ def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path
         raise EncodeError(f"sample encode failed at crf={crf}: {err.strip()[-300:]}")
 
 
+# Netflix 只发布了 1080p 和 4K 两套模型。默认模型按「1080p 屏幕、3 倍屏高
+# 观看距离」训练，用在 4K 片源上是错的量具；4K 模型对应「4K 屏幕、1.5 倍屏高」。
+# 同样的失真在 4K 模型下分数更高（实测同一对文件 95.0 -> 97.4），因为那个观看
+# 条件下本来就更不容易看出来。1440p 这类中间分辨率仍用默认模型：它离 1080p 的
+# 观看条件更近。
+VMAF_MODEL_4K = "vmaf_4k_v0.6.1"
+
+
+def vmaf_model_for(width: int, height: int, enabled: bool = True) -> str:
+    """按分辨率挑 VMAF 模型；返回空串表示用 libvmaf 的默认模型。"""
+    if not enabled:
+        return ""
+    if to_int(width) >= 3000 or to_int(height) >= 1700:
+        return VMAF_MODEL_4K
+    return ""
+
+
 def _pooled_score(data: dict, pool: str = "harmonic_mean") -> float:
     """从 libvmaf 的 json 里取分数，结构不对时报明确错误。
 
@@ -580,7 +597,25 @@ def vmaf_lavfi(shift: int = 0, model: str = "") -> str:
 
 
 def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0,
-               model: str = "", pool: str = "harmonic_mean"):
+               model: str = "", pool: str = "harmonic_mean", log=None):
+    """量一对片段的 VMAF；指定的模型加载不了时退回默认模型。
+
+    退回这一步是必要的：模型名不被认识时 libvmaf 直接报错退出，而校验链把
+    「libvmaf 用不了」当成告警放过——4K 片源会因此全部跳过画质门槛。
+    """
+    try:
+        return _vmaf_run(ffmpeg, distorted, reference, shift, model, pool)
+    except EncodeError:
+        if not model:
+            raise
+        if log:
+            log.warning(f"libvmaf model {model} is unavailable in this build; "
+                        f"falling back to the default model")
+        return _vmaf_run(ffmpeg, distorted, reference, shift, "", pool)
+
+
+def _vmaf_run(ffmpeg: str, distorted: Path, reference: Path, shift: int,
+              model: str, pool: str):
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         log_path = Path(td) / "vmaf.json"
         cmd = [
@@ -602,7 +637,8 @@ def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0,
 
 def pick_crf_adaptive(tools, src: Path, duration: float,
                       enc_cfg: dict, ad_cfg: dict, log,
-                      lossless_codec: str = "libx264") -> int | None:
+                      lossless_codec: str = "libx264",
+                      model: str = "") -> int | None:
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
     lo = int(ad_cfg.get("crf_min", 16))
     hi = int(ad_cfg.get("crf_max", 44))
@@ -624,7 +660,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
             mid = (lo + hi) // 2
             sample = root / f"s{mid}.mkv"
             encode_sample(tools.ffmpeg, ref, mid, enc_cfg, sample)
-            score = vmaf_score(tools.ffmpeg, sample, ref)
+            score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
             log.info(f"adaptive probe: crf={mid} vmaf={score:.2f} "
                      f"(target {target})")
             if score >= target:
@@ -635,7 +671,7 @@ def pick_crf_adaptive(tools, src: Path, duration: float,
         if best is None:
             sample = root / "smin.mkv"
             encode_sample(tools.ffmpeg, ref, lo, enc_cfg, sample)
-            score = vmaf_score(tools.ffmpeg, sample, ref)
+            score = vmaf_score(tools.ffmpeg, sample, ref, model=model, log=log)
             if score < target:
                 log.warning(
                     f"even crf={lo} only reaches vmaf={score:.2f} "
