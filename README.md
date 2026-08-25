@@ -126,7 +126,26 @@ vcompress ~/videos --dry-run
 - `av1`（默认）：SVT-AV1 `-preset 2 -crf 28`，同画质体积最小，速度极慢
 - `x265`：libx265 `-preset placebo -crf 20`，兼容性更好，速度慢
 
-两者都是"最慢=最小"的极限档位。preset 只影响压缩效率不影响画质，无需按片源调整。
+两者都是"最慢=最小"的极限档位。preset 只影响压缩效率不影响画质，无需按片源调整。preset 2 已经在收益递减区，再往 0/1 压额外收益极小甚至可能倒退。
+
+av1 节的 `extra` 是一组**偏主观画质**的参数（取自 SVT-AV1-Essential 这个"合理默认值"分支的调优结果，都在主线 SVT-AV1 里）：
+
+| 参数 | 作用 |
+|---|---|
+| `tune=0` | VQ 档（主线默认是 PSNR 档），按人眼而不是按指标优化 |
+| `enable-variance-boost=1` + `strength=1` `octile=4` | 给暗部和平坦低方差区域更多码率，正是最容易出 banding、而 VMAF 最测不出来的地方（主线默认关） |
+| `qp-scale-compress-strength=1` | 压缩迷你 GOP 内各层的 QP 范围，帧间质量更一致，直接改善"最差帧" |
+| `luminance-qp-bias=10` | 按帧平均亮度调 QP，专治暗场 |
+| `sharpness=1` / `ac-bias=0.25` | 保纹理和颗粒锐度（x265 那边对应 `psy-rd`） |
+| `tf-strength=1` | 削弱时域滤波（默认 3），少denoise、多保留细节 |
+| `enable-dlf=2` | 更精确的去块滤波，只花时间不损画质 |
+| `scd=1` + `keyint=257` | 场景切换处插关键帧，同时把 GOP 拉长到约 10 秒省码率；257 = 32×8+1，既贴合 mini-GOP 结构又不超过硬件解码器偏好的 300 帧 |
+
+有个取舍要知道：`sharpness`/`ac-bias` 这类"保细节"的参数会让同 CRF 下的 VMAF 略降，于是自适应搜索会选一个更低的 CRF——**主观画质更好，文件比纯指标最优更大一点**。这符合"视觉无损优先、体积次之"的取向；想反过来（更小的文件、纯按指标最优）就把这两项删掉。
+
+`extra` 里 SVT 不认识的键会被**静默忽略**（本机 ffmpeg 9 + SVT-AV1 4.2 实测拼错也照样编完），老一些的构建则可能直接报错。想确认参数真的生效，看编码日志里的 `SVT [config]` 那几行。
+
+x265 节只显式写了 `aq-mode=3`（默认 2）和 `psy-rd=2.0`；`placebo` 本身已经把 `rd=6`/`rdoq=2`/`psy-rdoq=1.0` 拉满，再堆参数只是自我安慰。
 
 想加第三个编码器，直接加一节 `[encode.vp9]`（至少给 `codec`/`preset`/`crf`），`--encoder vp9` 就能用，不需要改代码。
 

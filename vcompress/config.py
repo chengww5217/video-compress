@@ -39,7 +39,8 @@ DEFAULTS = {
             "preset": "2",
             "crf": 28,
             "min_bit_depth": 10,
-            "extra": "-svtav1-params tune=0:film-grain-denoise=0",
+            "extra":
+                "-svtav1-params tune=0:enable-variance-boost=1:variance-boost-strength=1:variance-octile=4:qp-scale-compress-strength=1:luminance-qp-bias=10:sharpness=1:ac-bias=0.25:tf-strength=1:enable-dlf=2:scd=1:keyint=257",
         },
         "x265": {
             "codec": "libx265",
