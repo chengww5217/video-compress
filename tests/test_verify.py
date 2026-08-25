@@ -260,12 +260,30 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.assertEqual(len(self.extracted), 4, "2 segments x ref+dist")
 
     def test_mean_below_threshold_reports_every_segment(self):
+        self.cfg["verify"]["vmaf_min_segment"] = 0.0
         self.scores = [80.0, 82.0]
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 81.0)
         self.assertIn("below threshold", msg)
         self.assertIn("80.00", msg)
         self.assertIn("82.00", msg)
+
+    def test_one_bad_segment_fails_even_when_the_mean_passes(self):
+        """99/99/81 的均值是 93，够过阈值，但那一段是看得出来的。"""
+        self.cfg["verify"]["vmaf_segments"] = 3
+        self.scores = [99.0, 99.0, 81.0]
+        mean, msg = self.check()
+        self.assertAlmostEqual(mean, 93.0)
+        self.assertIn("per-segment floor", msg)
+        self.assertIn("81.00", msg)
+
+    def test_per_segment_floor_can_be_disabled(self):
+        self.cfg["verify"]["vmaf_segments"] = 3
+        self.cfg["verify"]["vmaf_min_segment"] = 0.0
+        self.scores = [99.0, 99.0, 81.0]
+        mean, msg = self.check()
+        self.assertAlmostEqual(mean, 93.0)
+        self.assertEqual(msg, "")
 
     def test_zero_segments_still_measures_once(self):
         self.cfg["verify"]["vmaf_segments"] = 0
@@ -333,7 +351,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         encode.vmaf_score = lambda ff, dist, ref, shift=0: 70.0
         mean, msg = self.check()
         self.assertAlmostEqual(mean, 70.0)
-        self.assertIn("below threshold", msg)
+        self.assertIn("70.00", msg)
 
     def test_good_scores_are_not_rechecked(self):
         self.check()

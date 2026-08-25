@@ -68,6 +68,7 @@ DEFAULTS = {
         "vmaf_segments": 3,
         "vmaf_sample_seconds": 20,
         "vmaf_threshold": 93.0,
+        "vmaf_min_segment": 90.0,
         "keep_failed_output": False,
     },
     "run": {
@@ -221,6 +222,13 @@ def _check_semantics(cfg: dict, errors: list):
     vf = cfg["verify"]
     if not 0 < float(vf["vmaf_threshold"]) <= 100:
         errors.append("[verify] vmaf_threshold must be within (0, 100]")
+    if not 0 <= float(vf["vmaf_min_segment"]) <= 100:
+        errors.append("[verify] vmaf_min_segment must be within [0, 100] "
+                      "(0 turns the per-segment floor off)")
+    if float(vf["vmaf_min_segment"]) > float(vf["vmaf_threshold"]):
+        errors.append("[verify] vmaf_min_segment must not exceed "
+                      "vmaf_threshold; the floor is meant to catch a single "
+                      "bad segment, not to be stricter than the average")
     if int(vf["vmaf_segments"]) < 1:
         errors.append("[verify] vmaf_segments must be at least 1")
     if float(vf["vmaf_sample_seconds"]) <= 0:

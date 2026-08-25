@@ -169,6 +169,15 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
     if not records:
         return None, "no vmaf segment could be measured"
     mean = sum(s for _t, s in records) / len(records)
+    floor = to_float(vcfg.get("vmaf_min_segment"), 0.0)
+    worst_t, worst = min(records, key=lambda r: r[1])
+    # 段间取算术平均会掩盖单段崩掉：99/99/81 的均值是 93，照样通过，但那 81 分
+    # 的十几分钟是看得出来的。所以除了均值，再给单段设一条下限。
+    if floor > 0 and worst < floor:
+        return mean, (
+            f"vmaf segment at {worst_t:.0f}s scored {worst:.2f}, below the "
+            f"per-segment floor {floor} (segments: {_fmt_segments(records)})"
+        )
     if mean < threshold:
         return mean, (
             f"vmaf mean {mean:.2f} below threshold {threshold} "

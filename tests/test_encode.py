@@ -276,26 +276,43 @@ class RunEncodeStderrTests(unittest.TestCase):
         self.assertIn("boom", str(err))
 
 
-class PooledMeanTests(unittest.TestCase):
-    def test_vmaf_metric(self):
+class PooledScoreTests(unittest.TestCase):
+    def test_prefers_harmonic_mean(self):
+        """算术平均会被好帧稀释，默认取调和平均。"""
+        data = {"pooled_metrics": {"vmaf": {"mean": 95.5, "harmonic_mean": 93.1,
+                                           "min": 80}}}
+        self.assertAlmostEqual(encode._pooled_score(data), 93.1)
+
+    def test_explicit_pool_is_honoured(self):
+        data = {"pooled_metrics": {"vmaf": {"mean": 95.5, "harmonic_mean": 93.1,
+                                           "min": 80}}}
+        self.assertAlmostEqual(encode._pooled_score(data, "min"), 80)
+        self.assertAlmostEqual(encode._pooled_score(data, "mean"), 95.5)
+
+    def test_old_libvmaf_without_harmonic_mean_falls_back(self):
         data = {"pooled_metrics": {"vmaf": {"mean": 95.5, "min": 80}}}
-        self.assertAlmostEqual(encode._pooled_mean(data), 95.5)
+        self.assertAlmostEqual(encode._pooled_score(data), 95.5)
+
+    def test_named_vmaf_variant_is_found(self):
+        data = {"pooled_metrics": {"integer_adm2": {"mean": 0.98},
+                                   "vmaf_neg": {"mean": 91.0}}}
+        self.assertAlmostEqual(encode._pooled_score(data), 91.0)
 
     def test_falls_back_to_the_only_metric(self):
         data = {"pooled_metrics": {"float_ssim": {"mean": 0.98}}}
-        self.assertAlmostEqual(encode._pooled_mean(data), 0.98)
+        self.assertAlmostEqual(encode._pooled_score(data), 0.98)
 
     def test_missing_pooled_metrics_raises(self):
         with self.assertRaises(encode.EncodeError):
-            encode._pooled_mean({})
+            encode._pooled_score({})
 
-    def test_missing_mean_raises(self):
+    def test_missing_scores_raises(self):
         with self.assertRaises(encode.EncodeError):
-            encode._pooled_mean({"pooled_metrics": {"vmaf": {"min": 1}}})
+            encode._pooled_score({"pooled_metrics": {"vmaf": {"min": 1}}})
 
-    def test_non_numeric_mean_raises(self):
+    def test_non_numeric_score_raises(self):
         with self.assertRaises(encode.EncodeError):
-            encode._pooled_mean({"pooled_metrics": {"vmaf": {"mean": "n/a"}}})
+            encode._pooled_score({"pooled_metrics": {"vmaf": {"mean": "n/a"}}})
 
 
 ENCODERS_SAMPLE = """Encoders:

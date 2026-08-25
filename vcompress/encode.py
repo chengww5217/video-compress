@@ -530,46 +530,64 @@ def encode_sample(ffmpeg: str, ref: Path, crf: int, encoder_cfg: dict, out: Path
         raise EncodeError(f"sample encode failed at crf={crf}: {err.strip()[-300:]}")
 
 
-def _pooled_mean(data: dict) -> float:
-    """从 libvmaf 的 json 里取平均分，结构不对时报明确错误。"""
+def _pooled_score(data: dict, pool: str = "harmonic_mean") -> float:
+    """从 libvmaf 的 json 里取分数，结构不对时报明确错误。
+
+    默认取调和平均而不是算术平均：算术平均会被大量好帧稀释，一段里有几十帧
+    崩到 60 分，均值还能是 94。调和平均对低分帧更敏感，更贴近"最差处也得看得
+    过去"这个目标。libvmaf 版本老到没有这个键时退回算术平均。
+    """
     pooled = data.get("pooled_metrics") or {}
     entry = pooled.get("vmaf")
     if not isinstance(entry, dict):
+        # 退而求其次也只认名字里带 vmaf 的项；pooled_metrics 里还有一堆特征
+        # 分数（integer_adm2 之类），按字典顺序乱取会拿到毫无意义的数
+        entry = next((v for k, v in pooled.items()
+                      if "vmaf" in k.lower() and isinstance(v, dict)), None)
+    if not isinstance(entry, dict):
         entry = next((v for v in pooled.values() if isinstance(v, dict)), {})
-    mean = entry.get("mean")
-    if mean is None:
-        raise EncodeError("libvmaf output has no pooled mean score")
-    try:
-        return float(mean)
-    except (TypeError, ValueError) as e:
-        raise EncodeError(f"libvmaf mean score is not a number: {mean!r}") from e
+    for key in (pool, "mean"):
+        if key not in entry:
+            continue
+        try:
+            return float(entry[key])
+        except (TypeError, ValueError) as e:
+            raise EncodeError(
+                f"libvmaf {key} score is not a number: {entry[key]!r}") from e
+    raise EncodeError("libvmaf output has no pooled score")
 
 
-def vmaf_lavfi(shift: int = 0) -> str:
+def vmaf_lavfi(shift: int = 0, model: str = "") -> str:
     """libvmaf 滤镜链：两路都按帧号重编时间戳，逐帧对齐后再比。
 
     framesync 按时间戳配对，两个片段的 pts 网格哪怕整体差 1ms 都会错配；
     setpts=N/FR/TB 把两路都改成同一套帧号时间戳，配对只看第几帧。
     shift>0 丢掉待测段开头的帧，shift<0 丢掉参考段开头的帧，用来验证
     「分数低是不是因为错了一帧」。
+
+    model 给定时切换 VMAF 模型（默认模型按 1080p 观看条件训练）。
     """
     d_trim = f"trim=start_frame={shift}," if shift > 0 else ""
     r_trim = f"trim=start_frame={-shift}," if shift < 0 else ""
+    opts = "log_path=vmaf.json:log_fmt=json"
+    if model:
+        opts += f":model=version={model}"
     return (
         f"[0:v]{d_trim}setpts=N/FR/TB[d];"
         f"[1:v]{r_trim}setpts=N/FR/TB[r];"
-        f"[d][r]libvmaf=log_path=vmaf.json:log_fmt=json"
+        f"[d][r]libvmaf={opts}"
     )
 
 
-def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0):
+def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0,
+               model: str = "", pool: str = "harmonic_mean"):
     with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
         log_path = Path(td) / "vmaf.json"
         cmd = [
             ffmpeg, "-hide_banner",
             "-i", str(distorted),
             "-i", str(reference),
-            "-lavfi", vmaf_lavfi(shift),
+            "-lavfi", vmaf_lavfi(shift, model),
             "-f", "null", "-",
         ]
         rc, _out, err = proc.run_managed(cmd, cwd=td)
@@ -579,7 +597,7 @@ def vmaf_score(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0):
             data = json.loads(log_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:
             raise EncodeError(f"cannot read libvmaf output: {e}") from e
-        return _pooled_mean(data)
+        return _pooled_score(data, pool)
 
 
 def pick_crf_adaptive(tools, src: Path, duration: float,
