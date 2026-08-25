@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,6 +10,11 @@ from pathlib import Path
 log = logging.getLogger("vcompress")
 
 CACHED_ACTIONS = ("ok", "skipped")
+
+# 只有攒够这么多行、且其中一半以上是被后来记录顶掉的旧行，才值得压实。
+# 一次处理一万个文件是正常的（那一万行都还有效），反复 --force 重跑才会
+# 让同一个路径攒下几十行。
+COMPACT_MIN_LINES = 1000
 
 
 class ResultStore:
@@ -18,17 +24,51 @@ class ResultStore:
         self.lock = threading.Lock()
         self.history = {}
         if path.exists():
-            with open(path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        rec = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    if isinstance(rec, dict):
-                        self.history[rec.get("path", "")] = rec
+            self._load()
+
+    def _load(self) -> None:
+        """读入历史，每个路径只留最后一条；旧行太多时顺手压实一次。"""
+        total = 0
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                total += 1
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                key = rec.get("path", "")
+                # 先删再插：让这条记录排到末尾，压实后的顺序仍是时间顺序
+                self.history.pop(key, None)
+                self.history[key] = rec
+        if total >= COMPACT_MIN_LINES and total > 2 * len(self.history):
+            self._compact(total)
+
+    def _compact(self, before: int) -> None:
+        """把每个路径只剩一条的历史重写回去，先写临时文件再原子替换。
+
+        这个文件是断点续跑的唯一依据，所以宁可压实失败也不能写坏：临时文件
+        写完整了才 os.replace，中途挂掉时磁盘上仍是原来那份。
+        """
+        tmp = self.path.with_name(self.path.name + ".compact.tmp")
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                for rec in self.history.values():
+                    f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+            os.replace(tmp, self.path)
+        except OSError as e:
+            log.warning(f"cannot compact {self.path.name}: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            return
+        log.info(f"compacted {self.path.name}: {before} -> "
+                 f"{len(self.history)} record(s)")
 
     def last(self, path: Path):
         return self.history.get(str(path.resolve()))

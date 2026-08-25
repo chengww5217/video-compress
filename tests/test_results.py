@@ -119,5 +119,80 @@ class CacheFreshnessTests(unittest.TestCase):
         self.assertEqual(rec["action"], "skipped")
 
 
+class CompactionTests(unittest.TestCase):
+    """这个文件是断点续跑的唯一依据：可以变小，但不能变错。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.path = self.root / "results.jsonl"
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write_lines(self, records):
+        with open(self.path, "w", encoding="utf-8") as f:
+            for rec in records:
+                f.write(json.dumps(rec) + "\n")
+
+    def lines(self):
+        return self.path.read_text(encoding="utf-8").strip().splitlines()
+
+    def test_repeated_runs_of_the_same_files_are_compacted(self):
+        paths = [str(self.root / f"{i}.mp4") for i in range(3)]
+        self.write_lines([{"path": p, "action": "ok", "size": 100,
+                           "new_size": 40, "run": n}
+                          for n in range(400) for p in paths])
+        store = ResultStore(self.path)
+        self.assertEqual(len(self.lines()), 3)
+        self.assertEqual(len(store.history), 3)
+        # 留下的必须是最后一次的记录
+        for p in paths:
+            self.assertEqual(store.history[p]["run"], 399)
+        self.assertEqual(store.total_saved(), 3 * 60)
+
+    def test_reload_after_compaction_sees_the_same_history(self):
+        paths = [str(self.root / f"{i}.mp4") for i in range(2)]
+        self.write_lines([{"path": p, "action": "skipped", "size": 10,
+                           "reason": f"run {n}"}
+                          for n in range(600) for p in paths])
+        first = ResultStore(self.path).history
+        second = ResultStore(self.path).history
+        self.assertEqual(first, second)
+
+    def test_a_long_but_healthy_ledger_is_left_alone(self):
+        """一万个不同的文件就该有一万行，那不是垃圾。"""
+        self.write_lines([{"path": str(self.root / f"{i}.mp4"),
+                           "action": "ok", "size": 10, "new_size": 5}
+                          for i in range(1200)])
+        ResultStore(self.path)
+        self.assertEqual(len(self.lines()), 1200)
+
+    def test_a_short_ledger_is_left_alone(self):
+        paths = [str(self.root / "a.mp4")] * 20
+        self.write_lines([{"path": p, "action": "ok"} for p in paths])
+        ResultStore(self.path)
+        self.assertEqual(len(self.lines()), 20,
+                         "rewriting a 20-line file buys nothing")
+
+    def test_no_temp_file_is_left_behind(self):
+        paths = [str(self.root / f"{i}.mp4") for i in range(2)]
+        self.write_lines([{"path": p, "action": "ok"}
+                          for _n in range(600) for p in paths])
+        ResultStore(self.path)
+        self.assertEqual([p.name for p in self.root.iterdir()],
+                         ["results.jsonl"])
+
+    def test_appending_after_compaction_still_works(self):
+        src = self.root / "a.mp4"
+        src.write_bytes(b"x" * 50)
+        self.write_lines([{"path": str(src.resolve()), "action": "ok",
+                           "size": 50, "run": n} for n in range(1100)])
+        store = ResultStore(self.path)
+        store.add("skipped", make_info(path=src, size=50), reason="tagged")
+        self.assertEqual(len(self.lines()), 2)
+        self.assertIsNotNone(store.is_cached(src))
+
+
 if __name__ == "__main__":
     unittest.main()
