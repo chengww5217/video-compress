@@ -48,10 +48,10 @@ extra = "-x265-params aq-mode=3:psy-rd=2.0"
 enabled = true
 target_vmaf = 95.0
 crf_min = 16
-crf_max = 44
+crf_max = 50
 sample_seconds = 10
 sample_count = 4
-search_step = 2
+search_step = 1
 require_target = true
 
 [audio]
@@ -65,7 +65,7 @@ max_duration_diff_s = 0.5
 min_actual_saving = 0.05
 color_check = true
 vmaf_enabled = true
-vmaf_segments = 3
+vmaf_segments = 5
 vmaf_sample_seconds = 20
 vmaf_threshold = 93.0
 vmaf_min_segment = 90.0
