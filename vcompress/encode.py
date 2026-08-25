@@ -253,27 +253,57 @@ def opus_layout_args(index: int, channels: int) -> list:
     return [f"-mapping_family:a:{index}", "255"]
 
 
-def audio_plan(info, cfg) -> list:
-    """逐条音轨的处置决定：("copy"|"opus", 码率 bps)，码率 0 表示不知道。
+# 未压缩 PCM 转 FLAC 大致能省四成；TrueHD/ALAC 这些本身已经是无损压缩格式，
+# 换成 FLAC 体积基本持平。这两个比例只用来预估体积，不影响实际编码。
+FLAC_RATIO_PCM = 0.6
+FLAC_RATIO_PACKED = 1.0
+
+
+def flac_bitrate(codec: str, src_bitrate: int) -> int:
+    if src_bitrate <= 0:
+        return 0
+    ratio = (FLAC_RATIO_PCM if (codec or "").lower().startswith("pcm_")
+             else FLAC_RATIO_PACKED)
+    return int(src_bitrate * ratio)
+
+
+def audio_plan(info, cfg, container: str = ".mkv") -> list:
+    """逐条音轨的处置决定：("copy"|"flac"|"opus", 码率 bps)，0 表示不知道。
 
     单独抽出来是为了让「产物会有多大」这个预估和实际编码参数用同一套决定，
     不会两边各写一份判断然后慢慢走偏。
+
+    无损轨默认转 FLAC 而不是 Opus：这个工具压完是要删原文件的，把 TrueHD/PCM
+    换成有损轨就再也换不回来了，而 FLAC 仍是数学无损、也能省三到四成。想要
+    更小的体积就设 [audio] lossless = "opus"。FLAC 在 mp4 里播放器支持很差，
+    所以只在 mkv 系容器里用它。
     """
     threshold = int(cfg["audio"].get("transcode_over_kbps", 512)) * 1000
     base_kbps = int(cfg["audio"].get("opus_kbps", 160))
+    mode = str(cfg["audio"].get("lossless", "flac")).lower()
+    if (container or "").lower() not in MKV_LIKE:
+        mode = "opus"
     plan = []
     for i, codec in enumerate(info.audio_codecs):
         codec = (codec or "").lower()
         br = info.audio_bitrates[i] if i < len(info.audio_bitrates) else 0
         ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
-        if codec.startswith(LOSSLESS_AUDIO) or (br and br > threshold):
+        if codec.startswith(LOSSLESS_AUDIO):
+            if mode != "flac":
+                plan.append(("opus", opus_bitrate(base_kbps, ch) * 1000))
+            elif codec == "flac":
+                plan.append(("copy", br))  # 已经是 FLAC，重编一遍毫无意义
+            else:
+                plan.append(("flac", flac_bitrate(codec, br)))
+        elif br and br > threshold:
             plan.append(("opus", opus_bitrate(base_kbps, ch) * 1000))
         else:
             plan.append(("copy", br))
     return plan
 
 
-def predicted_size(info, cfg, video_bitrate: int):
+def predicted_size(info, cfg, video_bitrate: int,
+                   container: str = ".mkv"):
     """按样本实测的视频码率预估产物体积；信息不全时返回 None。
 
     比 [skip].expected_ratio 那张按编码器写死的粗估准得多：那是"h264 大概能
@@ -284,25 +314,29 @@ def predicted_size(info, cfg, video_bitrate: int):
     if video_bitrate <= 0 or info.duration <= 0:
         return None
     total = video_bitrate
-    for _kind, br in audio_plan(info, cfg):
+    for _kind, br in audio_plan(info, cfg, container):
         if br <= 0:
             return None  # 有音轨码率不明，整个预估就不可信，宁可不猜
         total += br
     return int(total * info.duration / 8)
 
 
-def audio_args(info, cfg) -> list:
-    """逐条音轨决定 copy 还是转 Opus，不因为一条无损轨就重压所有音轨。"""
+def audio_args(info, cfg, container: str = ".mkv") -> list:
+    """逐条音轨决定 copy / FLAC / Opus，不因为一条无损轨就重压所有音轨。"""
     if not info.audio_codecs:
         return []
     args = []
     transcoding = False
-    for i, (kind, bitrate) in enumerate(audio_plan(info, cfg)):
+    for i, (kind, bitrate) in enumerate(audio_plan(info, cfg, container)):
         if kind == "opus":
             ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
             args += [f"-c:a:{i}", "libopus",
                      f"-b:a:{i}", f"{bitrate // 1000}k"]
             args += opus_layout_args(i, ch)
+            transcoding = True
+        elif kind == "flac":
+            # 时间不是约束，直接上最高压缩档
+            args += [f"-c:a:{i}", "flac", f"-compression_level:a:{i}", "12"]
             transcoding = True
         else:
             args += [f"-c:a:{i}", "copy"]

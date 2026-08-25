@@ -164,7 +164,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
 
     cmd = encode.build_cmd(
         ctx.tools.ffmpeg, src, tmp, enc_cfg, crf,
-        encode.audio_args(info, ctx.cfg),
+        encode.audio_args(info, ctx.cfg, ctx.out_ext),
         encode.subtitle_args(info, ctx.out_ext),
         ctx.marker,
         info.comment,
@@ -193,7 +193,8 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
             f"below target {ctx.cfg['adaptive']['target_vmaf']}; "
             f"not worth compressing"
         )
-    predicted = encode.predicted_size(info, ctx.cfg, picked.video_bitrate)
+    predicted = encode.predicted_size(info, ctx.cfg,
+                                  picked.video_bitrate, ctx.out_ext)
     if predicted is None or info.size <= 0:
         return
     saving = 1.0 - predicted / info.size

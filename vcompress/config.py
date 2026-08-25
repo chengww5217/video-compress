@@ -63,6 +63,8 @@ DEFAULTS = {
     "audio": {
         "transcode_over_kbps": 512,
         "opus_kbps": 160,
+        # 无损轨怎么处理："flac" 保持数学无损，"opus" 体积更小但不可逆
+        "lossless": "flac",
     },
     "verify": {
         "decode_check": True,
@@ -275,6 +277,8 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[audio] opus_kbps must be positive")
     if int(audio["transcode_over_kbps"]) <= 0:
         errors.append("[audio] transcode_over_kbps must be positive")
+    if str(audio["lossless"]).lower() not in ("flac", "opus"):
+        errors.append('[audio] lossless must be "flac" or "opus"')
 
 
 def validate(cfg: dict) -> dict:

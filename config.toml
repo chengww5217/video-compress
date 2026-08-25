@@ -57,6 +57,7 @@ require_target = true
 [audio]
 transcode_over_kbps = 512
 opus_kbps = 160
+lossless = "flac"
 
 [verify]
 decode_check = true

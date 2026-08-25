@@ -173,7 +173,16 @@ x265 节只显式写了 `aq-mode=3`（默认 2）和 `psy-rd=2.0`；`placebo` �
 
 ### 音频与其它轨道 `[audio]`
 
-逐条音轨判断：普通有损轨直接复制，只有无损格式（PCM/FLAC/ALAC/TrueHD 等）或码率超过 `transcode_over_kbps`(512k) 的那一条转 Opus，不会因为一条无损轨就把整个文件的音轨全部重压。
+逐条音轨判断，不会因为一条无损轨就把整个文件的音轨全部重压：
+
+| 音轨 | 处理 |
+|---|---|
+| 普通有损轨（AAC/AC3/DTS…，码率 ≤ `transcode_over_kbps`） | 直接复制 |
+| 码率超过 `transcode_over_kbps`(512k) 的有损轨 | 转 Opus |
+| 无损轨（PCM/ALAC/TrueHD/MLP…） | 转 **FLAC**，仍是数学无损 |
+| 已经是 FLAC 的轨 | 直接复制，不重编 |
+
+无损轨默认转 FLAC 而不是 Opus，理由是这个工具压完要**删原文件**：把 TrueHD/PCM 换成有损轨就再也换不回来了，而 FLAC 是数学无损、PCM 转过去还能省三到四成。想要更小的体积就设 `[audio] lossless = "opus"`（5.1 的 TrueHD 从约 3 Mbps 降到 480k，一部电影能再省一两个 GB，代价是这一步不可逆）。输出容器是 mp4 系时自动改用 Opus——FLAC 在 mp4 里播放器支持很差。
 
 Opus 码率以 `opus_kbps`(160k) 作为**立体声**基准按声道数缩放：单声道 80k、5.1 得 480k、7.1 封顶 510k。
 

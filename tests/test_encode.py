@@ -16,6 +16,11 @@ class AudioArgsTests(unittest.TestCase):
     def setUp(self):
         self.cfg = make_cfg()
 
+    def opus_cfg(self):
+        cfg = make_cfg()
+        cfg["audio"]["lossless"] = "opus"
+        return cfg
+
     def test_normal_audio_copied(self):
         args = encode.audio_args(make_info(), self.cfg)
         self.assertEqual(args, ["-c:a", "copy"])
@@ -24,16 +29,36 @@ class AudioArgsTests(unittest.TestCase):
         info = make_info(audio_codecs=[], audio_bitrates=[])
         self.assertEqual(encode.audio_args(info, self.cfg), [])
 
-    def test_lossless_transcoded_to_opus(self):
-        for codec in ("pcm_s16le", "flac", "alac", "truehd"):
-            info = make_info(audio_codecs=[codec], audio_bitrates=[0],
-                             audio_channels=[2])
+    def test_lossless_goes_to_flac_by_default(self):
+        """压完要删原文件，无损轨不该悄悄变成有损。"""
+        for codec in ("pcm_s16le", "alac", "truehd", "mlp"):
+            info = make_info(audio_codecs=[codec], audio_bitrates=[3_000_000],
+                             audio_channels=[6])
             args = encode.audio_args(info, self.cfg)
-            self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k",
-                                    "-filter:a:0",
-                                    "aformat=channel_layouts=stereo"], codec)
+            self.assertEqual(args, ["-c:a:0", "flac",
+                                    "-compression_level:a:0", "12"], codec)
 
-    def test_high_bitrate_transcoded_to_opus(self):
+    def test_existing_flac_is_copied_not_reencoded(self):
+        info = make_info(audio_codecs=["flac"], audio_bitrates=[900_000],
+                         audio_channels=[2])
+        self.assertEqual(encode.audio_args(info, self.cfg), ["-c:a", "copy"])
+
+    def test_lossless_to_opus_when_configured(self):
+        info = make_info(audio_codecs=["truehd"], audio_bitrates=[4_000_000],
+                         audio_channels=[2])
+        args = encode.audio_args(info, self.opus_cfg())
+        self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k",
+                                "-filter:a:0",
+                                "aformat=channel_layouts=stereo"])
+
+    def test_mp4_output_falls_back_to_opus(self):
+        """FLAC 在 mp4 里播放器支持很差，宁可用 Opus。"""
+        info = make_info(audio_codecs=["truehd"], audio_bitrates=[4_000_000],
+                         audio_channels=[6])
+        args = encode.audio_args(info, self.cfg, ".mp4")
+        self.assertEqual(args[:4], ["-c:a:0", "libopus", "-b:a:0", "480k"])
+
+    def test_high_bitrate_lossy_still_goes_to_opus(self):
         info = make_info(audio_codecs=["aac"], audio_bitrates=[900_000],
                          audio_channels=[2])
         args = encode.audio_args(info, self.cfg)
@@ -42,22 +67,22 @@ class AudioArgsTests(unittest.TestCase):
     def test_bitrate_scales_with_channel_count(self):
         cases = {1: "80k", 2: "160k", 6: "480k", 8: "510k"}
         for ch, expected in cases.items():
-            info = make_info(audio_codecs=["flac"], audio_bitrates=[0],
+            info = make_info(audio_codecs=["truehd"], audio_bitrates=[0],
                              audio_channels=[ch])
-            args = encode.audio_args(info, self.cfg)
+            args = encode.audio_args(info, self.opus_cfg())
             self.assertEqual(args[3], expected, f"{ch} channels")
 
     def test_channel_layout_normalised_for_opus(self):
-        info = make_info(audio_codecs=["flac"], audio_bitrates=[0],
+        info = make_info(audio_codecs=["truehd"], audio_bitrates=[0],
                          audio_channels=[6])
-        args = encode.audio_args(info, self.cfg)
+        args = encode.audio_args(info, self.opus_cfg())
         self.assertEqual(args[4:], ["-filter:a:0",
                                     "aformat=channel_layouts=5.1"])
 
     def test_exotic_channel_count_uses_arbitrary_mapping(self):
         info = make_info(audio_codecs=["pcm_s16le"], audio_bitrates=[0],
                          audio_channels=[10])
-        args = encode.audio_args(info, self.cfg)
+        args = encode.audio_args(info, self.opus_cfg())
         self.assertEqual(args[4:], ["-mapping_family:a:0", "255"])
 
     def test_only_offending_track_is_transcoded(self):
@@ -65,9 +90,8 @@ class AudioArgsTests(unittest.TestCase):
                          audio_bitrates=[4_000_000, 192_000],
                          audio_channels=[6, 2])
         args = encode.audio_args(info, self.cfg)
-        self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "480k",
-                                "-filter:a:0", "aformat=channel_layouts=5.1",
-                                "-c:a:1", "copy"])
+        self.assertEqual(args, ["-c:a:0", "flac", "-compression_level:a:0",
+                                "12", "-c:a:1", "copy"])
 
     def test_all_copyable_tracks_use_the_short_form(self):
         info = make_info(audio_codecs=["aac", "ac3"],
@@ -76,12 +100,18 @@ class AudioArgsTests(unittest.TestCase):
         self.assertEqual(encode.audio_args(info, self.cfg), ["-c:a", "copy"])
 
     def test_missing_channel_info_falls_back_to_stereo(self):
-        info = make_info(audio_codecs=["flac"], audio_bitrates=[0],
+        info = make_info(audio_codecs=["truehd"], audio_bitrates=[0],
                          audio_channels=[])
-        args = encode.audio_args(info, self.cfg)
+        args = encode.audio_args(info, self.opus_cfg())
         self.assertEqual(args, ["-c:a:0", "libopus", "-b:a:0", "160k",
                                 "-filter:a:0",
                                 "aformat=channel_layouts=stereo"])
+
+    def test_flac_bitrate_estimate(self):
+        """PCM 转 FLAC 大约省四成；已经无损压缩过的格式基本持平。"""
+        self.assertEqual(encode.flac_bitrate("pcm_s24le", 1_000_000), 600_000)
+        self.assertEqual(encode.flac_bitrate("truehd", 4_000_000), 4_000_000)
+        self.assertEqual(encode.flac_bitrate("truehd", 0), 0)
 
 
 class VideoArgsTests(unittest.TestCase):
@@ -748,11 +778,20 @@ class PredictedSizeTests(unittest.TestCase):
         self.assertEqual(encode.predicted_size(info, self.cfg, 2_000_000),
                          27_500_000)
 
+    def test_lossless_track_counted_at_its_flac_bitrate(self):
+        info = make_info(duration=100.0, audio_codecs=["truehd"],
+                         audio_bitrates=[4_000_000], audio_channels=[6])
+        # TrueHD -> FLAC 体积基本持平，按 4 Mbps 算
+        self.assertEqual(encode.predicted_size(info, self.cfg, 1_000_000),
+                         int((1_000_000 + 4_000_000) * 100 / 8))
+
     def test_lossless_track_counted_at_its_opus_bitrate(self):
+        cfg = make_cfg()
+        cfg["audio"]["lossless"] = "opus"
         info = make_info(duration=100.0, audio_codecs=["truehd"],
                          audio_bitrates=[4_000_000], audio_channels=[6])
         # 6 声道 Opus = 480k，不是原来的 4 Mbps
-        self.assertEqual(encode.predicted_size(info, self.cfg, 1_000_000),
+        self.assertEqual(encode.predicted_size(info, cfg, 1_000_000),
                          int((1_000_000 + 480_000) * 100 / 8))
 
     def test_unknown_audio_bitrate_gives_up(self):
@@ -784,11 +823,10 @@ class AudioPlanTests(unittest.TestCase):
                          audio_channels=[2, 2, 6])
         plan = encode.audio_plan(info, self.cfg)
         self.assertEqual([kind for kind, _br in plan],
-                         ["copy", "opus", "opus"])
+                         ["copy", "copy", "opus"])
         args = encode.audio_args(info, self.cfg)
-        self.assertIn("-c:a:0", args)
         self.assertEqual(args[args.index("-c:a:0") + 1], "copy")
-        self.assertEqual(args[args.index("-b:a:1") + 1], "160k")
+        self.assertEqual(args[args.index("-c:a:1") + 1], "copy")
         self.assertEqual(args[args.index("-b:a:2") + 1], "480k")
 
 
