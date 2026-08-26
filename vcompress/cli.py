@@ -25,12 +25,23 @@ EXIT_INTERRUPTED = 130
 DEFAULT_CONFIG = Path(__file__).resolve().parents[1] / "config.toml"
 
 
+def dated_log_path(log_file: Path, day: str = "") -> Path:
+    """日志按日期分卷：vcompress.log -> vcompress-2026-08-26.log。
+
+    日期进了文件名，日志行里就不必再带；跨天运行时零点前后的两段日志会
+    分属两天，不在同一个文件里首尾相接。
+    """
+    day = day or time.strftime("%Y-%m-%d")
+    return log_file.with_name(f"{log_file.stem}-{day}{log_file.suffix}")
+
+
 def setup_logging(log_file: Path, max_bytes: int = 5_242_880,
                   backups: int = 3, argv=None) -> None:
-    """控制台 INFO（带颜色）、文件 DEBUG（纯文本 + 会话分隔）。
+    """控制台 INFO（带颜色）、文件 DEBUG（纯文本 + 按日期分卷 + 会话分隔）。
 
     文件按大小轮转，长期跑不会无限膨胀。
     """
+    log_file = dated_log_path(log_file)
     log_file.parent.mkdir(parents=True, exist_ok=True)
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)

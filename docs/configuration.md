@@ -105,7 +105,7 @@ VMAF 抽检的判定细节、色彩/HDR 比对原理见 [architecture.md](archit
 |---|---|---|
 | `workers` | 1 | 并发处理的文件数 |
 | `results_file` | `logs/results.jsonl` | 处理记录（相对路径按配置文件所在目录解析） |
-| `log_file` | `logs/vcompress.log` | 日志文件 |
+| `log_file` | `logs/vcompress.log` | 日志文件（实际按日期分卷，写成 `vcompress-2026-08-26.log` 这样） |
 | `log_max_bytes` | 5242880 | 日志轮转阈值 |
 | `log_backups` | 3 | 保留的日志备份份数 |
 | `use_recycle_bin` | false | 删除原文件时进回收站 |

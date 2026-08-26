@@ -377,7 +377,8 @@ class IntegrationTests(unittest.TestCase):
         results = box / "logs" / "results.jsonl"
         self.assertTrue(results.exists(),
                         "results.jsonl must sit next to the config, not in cwd")
-        self.assertTrue((box / "logs" / "vcompress.log").exists())
+        self.assertTrue(list((box / "logs").glob("vcompress-*.log")),
+                        "日志文件按日期分卷，仍要落在配置旁边的 logs/ 里")
         self.assertIn("relpath",
                       results.read_text(encoding="utf-8"))
 

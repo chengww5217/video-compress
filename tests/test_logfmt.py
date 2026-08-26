@@ -35,7 +35,7 @@ class ConsoleFormatterTests(unittest.TestCase):
 
     def test_plain_mode_has_no_escape_codes_or_markers(self):
         out = self.fmt(logging.INFO, f"压缩 {logfmt.em('a.mkv')}", color=False)
-        self.assertRegex(out, r"^\d{4} \d{2}:\d{2}:\d{2} INFO\s+压缩 a\.mkv$")
+        self.assertRegex(out, r"^\d{2}:\d{2}:\d{2} INFO\s+压缩 a\.mkv$")
         self.assertNotIn("\x1b", out)
         self.assertNotIn(logfmt.EM_START, out)
 
@@ -49,7 +49,7 @@ class ConsoleFormatterTests(unittest.TestCase):
     def test_colored_mode_keeps_the_file_layout_underneath(self):
         out = self.fmt(logging.WARNING, "小心")
         plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
-        self.assertRegex(plain, r"^\d{4} \d{2}:\d{2}:\d{2} WARNING 小心$")
+        self.assertRegex(plain, r"^\d{2}:\d{2}:\d{2} WARNING 小心$")
 
     def test_levels_use_different_colors(self):
         warn = self.fmt(logging.WARNING, "小心")
@@ -79,15 +79,15 @@ class ConsoleFormatterTests(unittest.TestCase):
 
 
 class FileFormatterTests(unittest.TestCase):
-    def test_no_color_no_markers_but_has_a_date(self):
+    def test_no_color_no_markers(self):
+        """行内只有时分秒：日期在日志文件名里，逐行再带就是噪音。"""
         out = logfmt.FileFormatter().format(
             record(logging.WARNING, f"清掉 {logfmt.em('a.tmp.mkv')}"))
         self.assertNotIn("\x1b", out)
         self.assertNotIn(logfmt.EM_START, out)
         self.assertIn("WARNING", out)
         self.assertIn("清掉 a.tmp.mkv", out)
-        # 月日 时:分:秒
-        self.assertRegex(out, r"^\d{4} \d{2}:\d{2}:\d{2} ")
+        self.assertRegex(out, r"^\d{2}:\d{2}:\d{2} ")
 
 
 class ColorDetectionTests(unittest.TestCase):

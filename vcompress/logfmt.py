@@ -2,15 +2,17 @@
 
 日志文本一律用中文——这个工具是人看着跑的，出问题时要一眼读懂。
 
-两路的文本布局完全一致（`0826 17:34:10 INFO    消息`），差别只在能力和详细度：
+两路的文本布局完全一致（`17:34:10 INFO    消息`），差别只在能力和详细度。
+行内不带日期：日志文件按日期分卷，日期在文件名里。
 
 * **控制台**：INFO 起，终端支持时上色——级别、行首的 `[编码]`/`[完成]` 这类
   状态标签、消息里用 `em()` 包住的重点值（文件名、CRF、VMAF、体积）加粗高亮。
   颜色只是装饰，剥掉转义后文本和文件日志逐字节一致。不是终端（重定向到
   文件、CI）或设了 `NO_COLOR` 时自动退化成纯文本。
-* **文件**：DEBUG 起，不上色（ANSI 转义写进文件只会碍事）。文件是追加写的，
-  所以每次启动先空几行、打一条 `==== 0825 21:30:01 启动程序 ====`，翻历史时
-  好找到某一次运行从哪儿开始。
+* **文件**：DEBUG 起，不上色（ANSI 转义写进文件只会碍事），文件名带日期后缀
+  （`vcompress-2026-08-26.log`），按天分卷。每天内是追加写的，所以每次启动
+  先空几行、打一条 `==== 0825 21:30:01 启动程序 ====`，翻历史时好找到某一次
+  运行从哪儿开始。
 """
 
 import logging
@@ -107,11 +109,13 @@ def _enable_windows_ansi() -> bool:
 
 
 def _plain_line(formatter: logging.Formatter, record: logging.LogRecord) -> str:
-    """控制台与文件共用的纯文本行：`0826 17:34:10 INFO    消息`。
+    """控制台与文件共用的纯文本行：`17:34:10 INFO    消息`。
 
     格式只有这一份（以文件格式为准），控制台的无颜色路径必须与之逐字节一致。
+    行内不带日期：日志文件已经按日期分卷（vcompress-2026-08-26.log），
+    会话分隔线上也有完整日期，每行再带就是噪音。
     """
-    stamp = time.strftime("%m%d %H:%M:%S", formatter.converter(record.created))
+    stamp = time.strftime("%H:%M:%S", formatter.converter(record.created))
     message = strip_marks(record.getMessage())
     if record.exc_info:
         message += "\n" + formatter.formatException(record.exc_info)
@@ -129,7 +133,7 @@ class ConsoleFormatter(logging.Formatter):
         if not self.color:
             return _plain_line(self, record)
 
-        stamp = time.strftime("%m%d %H:%M:%S", self.converter(record.created))
+        stamp = time.strftime("%H:%M:%S", self.converter(record.created))
         line_style, em_style = LEVEL_STYLES.get(record.levelno, ("", BOLD))
         label = f"{record.levelname:<7}"
         message = record.getMessage()

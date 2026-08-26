@@ -123,6 +123,10 @@ class LoggingSetupTests(unittest.TestCase):
             root.addHandler(h)
         self.tmp.cleanup()
 
+    def test_log_file_name_carries_the_date(self):
+        dated = cli.dated_log_path(self.root / "vc.log", day="2026-08-26")
+        self.assertEqual(dated.name, "vc-2026-08-26.log")
+
     def silence_console(self):
         """只留文件 handler，别把几百行测试日志喷到测试输出里。"""
         root = logging.getLogger()
@@ -136,8 +140,9 @@ class LoggingSetupTests(unittest.TestCase):
         cli.setup_logging(target)
         self.silence_console()
         logging.getLogger("vcompress").info("hello")
-        self.assertTrue(target.exists())
-        self.assertIn("hello", target.read_text(encoding="utf-8"))
+        dated = cli.dated_log_path(target)
+        self.assertTrue(dated.exists())
+        self.assertIn("hello", dated.read_text(encoding="utf-8"))
 
     def test_repeated_setup_does_not_duplicate_handlers(self):
         target = self.root / "vc.log"
@@ -156,7 +161,7 @@ class LoggingSetupTests(unittest.TestCase):
         cli.setup_logging(target, argv=["vcompress", "/videos", "--dry-run"])
         self.silence_console()
         logging.getLogger("vcompress").info("第二次")
-        text = target.read_text(encoding="utf-8")
+        text = cli.dated_log_path(target).read_text(encoding="utf-8")
         self.assertEqual(text.count("启动程序 ===="), 2, text)
         self.assertIn("命令行: vcompress /videos --dry-run", text)
         self.assertIn("\n\n\n====", text)
@@ -166,7 +171,7 @@ class LoggingSetupTests(unittest.TestCase):
         cli.setup_logging(target)
         self.silence_console()
         logging.getLogger("vcompress").warning(f"清掉 {em('a.tmp.mkv')}")
-        text = target.read_text(encoding="utf-8")
+        text = cli.dated_log_path(target).read_text(encoding="utf-8")
         self.assertNotIn("\x1b", text)
         self.assertIn("清掉 a.tmp.mkv", text)
 
@@ -177,8 +182,8 @@ class LoggingSetupTests(unittest.TestCase):
         log = logging.getLogger("vcompress")
         for i in range(300):
             log.info(f"line {i} " + "x" * 80)
-        rotated = sorted(p.name for p in self.root.glob("vc.log*"))
-        self.assertIn("vc.log.1", rotated, rotated)
+        rotated = sorted(p.name for p in self.root.glob("vc-*.log*"))
+        self.assertTrue(any(name.endswith(".1") for name in rotated), rotated)
         self.assertLessEqual(len(rotated), 3, rotated)
 
 
@@ -332,7 +337,8 @@ class MainShutdownTests(unittest.TestCase):
                             + (extra or []))
 
     def log_text(self) -> str:
-        return (self.root / "vc.log").read_text(encoding="utf-8")
+        log = cli.dated_log_path(self.root / "vc.log")
+        return log.read_text(encoding="utf-8")
 
     def test_off_announces_how_to_turn_it_on_and_never_shuts_down(self):
         self.write_cfg("false")
