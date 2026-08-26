@@ -83,7 +83,7 @@ color_check = true         # 色彩属性与 HDR 母版信息必须原样带过�
 vmaf_enabled = true
 vmaf_segments = 5          # 抽几段
 vmaf_sample_seconds = 20   # 每段多长
-vmaf_threshold = 93.0      # 各段（调和平均）的均值下限
+vmaf_threshold = 93.0      # 各段均值的下限（段内取调和平均，跨段取算术平均）
 vmaf_min_segment = 90.0    # 单段下限，防止一段崩掉被均值掩盖；0 = 关掉
 vmaf_4k_model = true       # 4K 源换用 vmaf_4k 模型（搜索与抽检共用这个开关）
 keep_failed_output = false # 校验没过时把产物留成 .failed.mkv 而不是删掉
