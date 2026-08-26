@@ -39,7 +39,13 @@ def failed_path(src: Path, out_ext: str) -> Path:
 
 
 def gather_files(paths, recursive: bool, extensions: set):
+    """收集要处理的文件，返回 (文件列表, 失效路径列表)。
+
+    失效路径 = 显式传入但不存在/暂不可用的路径。调用方据此区分「没有活干」
+    和「路径全写错了」。
+    """
     files = []
+    invalid = []
     for p in paths:
         p = Path(p)
         if p.is_file():
@@ -65,6 +71,7 @@ def gather_files(paths, recursive: bool, extensions: set):
             # 不存在、盘暂不可用、断掉的符号链接都会落到这里。绝不能无声吞掉：
             # 用户可能把输出路径当成第二个参数传进来，全吞掉时连排查线索都没有
             log.warning(f"路径不存在或暂时不可用，已忽略：{em(str(p))}")
+            invalid.append(p)
     seen = set()
     unique = []
     for f in files:
@@ -72,7 +79,7 @@ def gather_files(paths, recursive: bool, extensions: set):
         if r not in seen:
             seen.add(r)
             unique.append(f)
-    return sorted(unique)
+    return sorted(unique), invalid
 
 
 def clean_stale_tmp(files, out_ext: str):

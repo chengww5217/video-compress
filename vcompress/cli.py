@@ -239,9 +239,14 @@ def main(argv=None) -> int:
     if not preflight(caps, cfg, encoder, args.adaptive):
         return EXIT_FAILED
 
-    found = files.gather_files(args.paths, args.recursive,
-                              set(cfg["skip"]["extensions"]))
+    found, invalid = files.gather_files(args.paths, args.recursive,
+                                        set(cfg["skip"]["extensions"]))
     if not found:
+        if len(invalid) == len(args.paths):
+            # 一个有效路径都没有：多半是路径写错了，按用法错误退出
+            log.error("没有找到可处理的视频文件：传入的路径全部无效"
+                      "（见上面的警告）")
+            return EXIT_USAGE
         log.info("没有找到可处理的视频文件")
         return EXIT_OK
     log.info(f"待检查 {em(len(found))} 个文件")

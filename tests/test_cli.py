@@ -250,6 +250,22 @@ class MainEarlyExitTests(unittest.TestCase):
         rc = cli.main([str(self.root), "--config", str(p)])
         self.assertEqual(rc, cli.EXIT_OK)
 
+    def test_all_paths_invalid_is_a_usage_error(self):
+        """传入的路径全部失效多半是用法错误（比如把输出路径当了参数）。"""
+        p = self.write_cfg("")
+        rc = cli.main([str(self.root / "nope"), "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_USAGE)
+
+    def test_partially_invalid_paths_still_process_the_rest(self):
+        vid = self.root / "a.mp4"
+        vid.write_bytes(b"x")
+        p = self.write_cfg("")
+        with mock.patch.object(cli, "_run_serial") as run:
+            rc = cli.main([str(self.root / "nope"), str(vid),
+                           "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertEqual(run.call_count, 1)
+
 
 class MainShutdownTests(unittest.TestCase):
     """关机开关的端到端接线：开始时播报、结束时重读配置、关机前写回 false。"""

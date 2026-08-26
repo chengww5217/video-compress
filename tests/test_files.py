@@ -56,48 +56,57 @@ class GatherFilesTests(unittest.TestCase):
     def names(self, found):
         return {f.name for f in found}
 
+    def gather(self, paths, recursive, extensions):
+        return gather_files(paths, recursive, extensions)[0]
+
     def test_recursive_finds_and_filters(self):
-        found = gather_files([self.root], True, {".mp4", ".mkv"})
+        found = self.gather([self.root], True, {".mp4", ".mkv"})
         self.assertEqual(self.names(found), {"a.mp4", "c.mkv", "d.mp4"})
 
     def test_own_intermediate_files_are_never_inputs(self):
-        found = gather_files([self.root], True, {".mp4", ".mkv"})
+        found = self.gather([self.root], True, {".mp4", ".mkv"})
         self.assertNotIn("e.mp4.tmp.mkv", self.names(found))
         self.assertNotIn("f.mp4.failed.mkv", self.names(found),
                          "rejected outputs must not be re-compressed")
 
     def test_no_recursive_only_top_level(self):
-        found = gather_files([self.root], False, {".mp4", ".mkv"})
+        found = self.gather([self.root], False, {".mp4", ".mkv"})
         self.assertEqual(self.names(found), {"a.mp4"})
 
     def test_deduplicates_overlapping_paths(self):
-        dup = gather_files([self.root, self.root], True, {".mp4", ".mkv"})
+        dup, invalid = gather_files([self.root, self.root], True,
+                                    {".mp4", ".mkv"})
         self.assertEqual(len(dup), 3)
+        self.assertEqual(invalid, [])
 
     def test_explicit_file_accepted(self):
         f = self.root / "a.mp4"
-        found = gather_files([f, f], False, {".mp4"})
+        found = self.gather([f, f], False, {".mp4"})
         self.assertEqual(len(found), 1)
 
     def test_missing_path_warns_instead_of_vanishing(self):
         """不存在的路径必须留痕：用户可能把输出路径当成了第二个参数。"""
         ghost = self.root / "ghost.mp4"
         with self.assertLogs("vcompress", level="WARNING") as cm:
-            found = gather_files([ghost, self.root / "a.mp4"], False, {".mp4"})
+            found, invalid = gather_files([ghost, self.root / "a.mp4"],
+                                          False, {".mp4"})
         self.assertEqual(self.names(found), {"a.mp4"})
+        self.assertEqual(invalid, [ghost])
         self.assertTrue(any("ghost.mp4" in line for line in cm.output))
 
     def test_explicit_unsupported_extension_warns(self):
         with self.assertLogs("vcompress", level="WARNING") as cm:
-            found = gather_files([self.root / "note.txt"], False, {".mp4"})
+            found, invalid = gather_files([self.root / "note.txt"],
+                                          False, {".mp4"})
         self.assertEqual(found, [])
+        self.assertEqual(invalid, [], "存在的文件只是类型不符，不算失效路径")
         self.assertTrue(any("note.txt" in line for line in cm.output))
 
     def test_explicit_intermediate_file_warns(self):
         """目录扫描静默排除中途产物是对的，显式点名则被跳过必须留痕。"""
         f = self.root / "e.mp4.tmp.mkv"
         with self.assertLogs("vcompress", level="WARNING") as cm:
-            found = gather_files([f], False, {".mp4", ".mkv"})
+            found = self.gather([f], False, {".mp4", ".mkv"})
         self.assertEqual(found, [])
         self.assertTrue(any("e.mp4.tmp.mkv" in line for line in cm.output))
 
@@ -105,7 +114,7 @@ class GatherFilesTests(unittest.TestCase):
         empty = self.root / "empty"
         empty.mkdir()
         with self.assertLogs("vcompress", level="WARNING") as cm:
-            found = gather_files([empty], True, {".mp4"})
+            found = self.gather([empty], True, {".mp4"})
         self.assertEqual(found, [])
         self.assertTrue(any("empty" in line for line in cm.output))
 
