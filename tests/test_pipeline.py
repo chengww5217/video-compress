@@ -219,7 +219,19 @@ class SkipAndDryRunTests(PipelineTestCase):
             outcome = pipeline.process_file(ctx, self.src)
         self.assertEqual(outcome, pipeline.DRYRUN)
         self.assertEqual(sorted(p.name for p in self.root.iterdir()),
-                         ["a.mp4", "results.jsonl"])
+                         ["a.mp4"],
+                         "预览不改任何文件，包括 results.jsonl 也不写")
+        self.assertIsNone(self.store.last(self.src))
+
+    def test_dry_run_probe_failure_is_not_persisted(self):
+        """探测失败在预览里照样报（真跑也会失败），但不落进断点续跑的记录。"""
+        ctx = self.ctx(dry_run=True)
+        with mock.patch.object(pipeline.probe, "probe",
+                               side_effect=RuntimeError("ffprobe failed")):
+            outcome = pipeline.process_file(ctx, self.src)
+        self.assertEqual(outcome, pipeline.FAILED)
+        self.assertIsNone(self.store.last(self.src))
+        self.assertFalse((self.root / "results.jsonl").exists())
 
 
 class PreEncodeRejectTests(PipelineTestCase):

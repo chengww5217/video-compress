@@ -95,8 +95,11 @@ def process_file(ctx: RunContext, src: Path) -> str:
         info = probe.probe(ctx.tools, src)
     except Exception as e:
         log.error(f"[失败] {em(src.name)}：探测失败：{e}")
-        ctx.store.add("failed", None, path=str(src.resolve()), stage="probe",
-                      error=str(e)[:500])
+        if not ctx.dry_run:
+            # 预览不是真实运行：失败要报（真跑也会失败），但不能落进
+            # results.jsonl——那是断点续跑的状态，预览不该留下状态
+            ctx.store.add("failed", None, path=str(src.resolve()),
+                          stage="probe", error=str(e)[:500])
         return ctx.stats.record(FAILED)
 
     skip, reason = probe.should_skip(info, ctx.cfg)
@@ -109,7 +112,6 @@ def process_file(ctx: RunContext, src: Path) -> str:
         log.info(f"[预览] 会压缩 {em(src.name)}"
                  f"（{info.codec_family or info.video_codec}，"
                  f"{fmt_size(info.size)}）")
-        ctx.store.add("dryrun", info)
         return ctx.stats.record(DRYRUN)
 
     return _compress(ctx, src, info)
