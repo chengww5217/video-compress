@@ -101,6 +101,14 @@ class GatherFilesTests(unittest.TestCase):
         self.assertEqual(found, [])
         self.assertTrue(any("e.mp4.tmp.mkv" in line for line in cm.output))
 
+    def test_empty_directory_warns(self):
+        empty = self.root / "empty"
+        empty.mkdir()
+        with self.assertLogs("vcompress", level="WARNING") as cm:
+            found = gather_files([empty], True, {".mp4"})
+        self.assertEqual(found, [])
+        self.assertTrue(any("empty" in line for line in cm.output))
+
 
 class CleanStaleTmpTests(unittest.TestCase):
     def setUp(self):

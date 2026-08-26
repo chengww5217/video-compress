@@ -53,10 +53,14 @@ def gather_files(paths, recursive: bool, extensions: set):
                 log.warning(f"{em(p.name)} 的扩展名不在支持列表里，已忽略")
         elif p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
+            before = len(files)
             for f in it:
                 if f.is_file() and f.suffix.lower() in extensions \
                         and not is_intermediate(f.name):
                     files.append(f)
+            if len(files) == before:
+                hint = "" if recursive else "（未递归子目录）"
+                log.warning(f"目录里没有可处理的视频文件{hint}：{em(str(p))}")
         else:
             # 不存在、盘暂不可用、断掉的符号链接都会落到这里。绝不能无声吞掉：
             # 用户可能把输出路径当成第二个参数传进来，全吞掉时连排查线索都没有
