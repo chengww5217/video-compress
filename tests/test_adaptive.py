@@ -118,5 +118,64 @@ class AdaptiveFallbackTests(unittest.TestCase):
         self.assertIsNone(picked)
 
 
+class PickCrfMarginTests(unittest.TestCase):
+    """贴线的搜索结果要自动降一档：样本外推到全片的波动不能把宝押在运气上。
+
+    假想的片源：crf ≤ 31 时最差段 95.5，31 < crf ≤ 32 时 95.02（贴线），
+    更高直接崩到 94。余量 0 时 32 会被录取；余量 0.05 时只能录到 31。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.orig_encode = adaptive._encode_sample
+        self.orig_score = vmaf.measure
+        self.orig_extract = vmaf.extract_segment
+        adaptive._encode_sample = self.fake_encode
+        vmaf.measure = self.fake_score
+        vmaf.extract_segment = self.fake_extract
+        self.last_crf = None
+        self.log = logging.getLogger("pick-crf-test")
+        self.log.addHandler(logging.NullHandler())
+
+    def tearDown(self):
+        adaptive._encode_sample = self.orig_encode
+        vmaf.measure = self.orig_score
+        vmaf.extract_segment = self.orig_extract
+        self.tmp.cleanup()
+
+    def fake_extract(self, ff, src, start, seconds, out, codec="libx264"):
+        Path(out).write_bytes(b"ref")
+
+    def fake_encode(self, ff, ref, crf, cfg, out):
+        self.last_crf = crf
+        Path(out).write_bytes(b"x" * 1000)
+
+    def fake_score(self, ff, dist, ref, shift=0, **kw):
+        crf = self.last_crf
+        if crf <= 31:
+            return 95.5
+        if crf <= 32:
+            return 95.02
+        return 94.0
+
+    def pick(self, margin):
+        cfg = make_cfg()
+        ad = cfg["adaptive"]
+        ad["target_margin"] = margin
+        ad["sample_count"] = 2
+        return adaptive.pick_crf(helpers.FakeTools(), self.root / "a.mp4",
+                                 600.0, cfg["encode"]["av1"], ad, self.log)
+
+    def test_zero_margin_keeps_the_borderline_result(self):
+        picked = self.pick(0.0)
+        self.assertEqual(picked.crf, 32)
+        self.assertTrue(picked.meets_target)
+
+    def test_borderline_result_steps_down_a_notch(self):
+        picked = self.pick(0.05)
+        self.assertEqual(picked.crf, 31)
+
+
 if __name__ == "__main__":
     unittest.main()

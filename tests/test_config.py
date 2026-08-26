@@ -168,6 +168,12 @@ class ValidationTests(unittest.TestCase):
         cfg = config.normalise({"adaptive": {"target_vmaf": 95}})
         self.assertEqual(cfg["adaptive"]["target_vmaf"], 95)
 
+    def test_out_of_range_target_margin_is_rejected(self):
+        self.assert_rejected({"adaptive": {"target_margin": -0.1}},
+                             "target_margin")
+        self.assert_rejected({"adaptive": {"target_margin": 2.0}},
+                             "target_margin")
+
     def test_all_problems_are_reported_at_once(self):
         msg = self.assert_rejected(
             {"run": {"workers": "many"}, "skip": {"typo": 1}})

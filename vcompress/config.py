@@ -56,6 +56,8 @@ DEFAULTS = {
     "adaptive": {
         "enabled": True,
         "target_vmaf": 95.0,
+        # 搜索余量：样本最差段要过 target_vmaf + target_margin 才录取
+        "target_margin": 0.05,
         "crf_min": 16,
         "crf_max": 50,
         "sample_seconds": 10,
@@ -238,6 +240,9 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[adaptive] crf_min 必须小于 crf_max")
     if not 0 < float(ad["target_vmaf"]) <= 100:
         errors.append("[adaptive] target_vmaf 必须在 (0, 100] 之间")
+    if not 0 <= float(ad["target_margin"]) <= 1:
+        errors.append("[adaptive] target_margin 必须在 [0, 1] 之间"
+                      "（单位是 VMAF 分，写 0 关闭余量）")
     if int(ad["sample_seconds"]) <= 0:
         errors.append("[adaptive] sample_seconds 必须是正数")
     if int(ad["sample_count"]) < 1:

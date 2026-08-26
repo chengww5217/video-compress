@@ -62,6 +62,7 @@ extra = "-x265-params aq-mode=3:psy-rd=2.0"
 [adaptive]
 enabled = true
 target_vmaf = 95.0     # 视觉无损基准，取多段里的最差段；想更激进可降到 92~93
+target_margin = 0.05   # 搜索余量：样本最差段要过 目标+余量 才录取，贴线 CRF 自动降档；0 关闭
 crf_min = 16
 crf_max = 50
 sample_seconds = 10    # 每段样本多长
