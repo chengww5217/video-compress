@@ -4,8 +4,10 @@
 同一个路径上。
 """
 
+import errno
 import logging
 import os
+import shutil
 import threading
 from pathlib import Path
 
@@ -105,6 +107,23 @@ def same_path(a: Path, b: Path) -> bool:
         return str(a.resolve()) == str(b.resolve())
 
 
+def move_file(src: Path, dst: Path) -> None:
+    """os.replace 的跨盘版本：同卷原子替换；跨卷退化为复制后删除。
+
+    输出目录和源文件不在一块盘时（-o 指向另一块盘），Windows 上 os.replace
+    直接 WinError 17，几小时编出来的产物会搬不动。调用方保证 dst 空闲，
+    所以这里不做「目标是目录就搬进去」之类的聪明事。
+    """
+    try:
+        os.replace(src, dst)
+    except OSError as e:
+        # 跨盘：POSIX 报 EXDEV，Windows 报 WinError 17（ERROR_NOT_SAME_DEVICE）
+        if getattr(e, "winerror", None) != 17 and e.errno != errno.EXDEV:
+            raise
+        shutil.copy2(src, dst)
+        src.unlink()
+
+
 def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
                        keep: bool, logger=None, taken=()) -> Path:
     """决定最终输出路径，任何情况下都不覆盖已存在的其它文件。
@@ -123,7 +142,8 @@ def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
     in_place = not keep and same_path(target, src)
     if not busy(target) or (in_place and str(target) not in reserved):
         return target
-    alt = src.with_name(f"{src.stem}.{encoder}{out_ext}")
+    # 备用名跟着 target 的目录走：输出目录（-o）模式下源目录不一定是目标目录
+    alt = target.with_name(f"{target.stem}.{encoder}{out_ext}")
     if busy(alt):
         raise RuntimeError(
             f"输出名 {target.name} 已被占用，不覆盖已有文件"

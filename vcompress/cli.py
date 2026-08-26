@@ -82,6 +82,9 @@ def build_parser() -> argparse.ArgumentParser:
         description="基于 ffmpeg 的视觉无损视频压缩工具",
     )
     ap.add_argument("paths", nargs="+", help="要处理的视频文件或目录")
+    ap.add_argument("-o", "--output", default=None, metavar="目录",
+                    help="输出目录（默认：源文件所在目录）。目录必须已存在，"
+                         "有问题会直接报错退出")
     ap.add_argument("--config", default=None,
                     help=f"配置文件（默认：{DEFAULT_CONFIG}）")
     ap.add_argument("--dry-run", action="store_true",
@@ -108,6 +111,22 @@ def build_parser() -> argparse.ArgumentParser:
     keep.add_argument("--delete-original", action="store_true",
                       help="压缩副本校验通过后删除原文件（覆盖默认的保留行为）")
     return ap
+
+
+def _check_output_dir(value):
+    """-o/--output 的输出目录：有问题（不存在/不是目录）直接告警返回 None。
+
+    目录有问题时继续跑等于把产物落到用户没预期的地方——和当初「第二个参数
+    被静默忽略」是同一类事故，所以宁可直接退出。不存在就不帮忙建：建错了
+    地方更隐蔽。
+    """
+    if not value:
+        return None
+    path = Path(value).expanduser()
+    if not path.is_dir():
+        log.error(f"输出目录不存在或不是目录：{path}")
+        return None
+    return path.resolve()
 
 
 def _load_config(arg_value):
@@ -179,7 +198,8 @@ def _report(stats: RunStats, store: ResultStore, elapsed: float = 0.0) -> None:
 
 
 def _log_settings(cfg: dict, encoder: str, adaptive: bool, keep: bool,
-                  recycle: bool, workers: int, dry_run: bool) -> None:
+                  recycle: bool, workers: int, dry_run: bool,
+                  output_dir=None) -> None:
     """开跑之前把这次的关键设置摆在控制台上，省得回头猜是按什么档压的。"""
     enc_cfg = cfg["encode"][encoder]
     bits = [f"编码器 {em(encoder)}（{enc_cfg['codec']} "
@@ -191,6 +211,8 @@ def _log_settings(cfg: dict, encoder: str, adaptive: bool, keep: bool,
     bits.append("保留原文件" if keep else em("压缩后删除原文件"))
     if not keep and recycle:
         bits.append("删除走回收站")
+    if output_dir is not None:
+        bits.append(f"输出到 {em(str(output_dir))}")
     if workers > 1:
         bits.append(f"并发 {workers}")
     if dry_run:
@@ -228,6 +250,10 @@ def main(argv=None) -> int:
         return EXIT_USAGE
     cfg["encode"]["encoder"] = encoder
 
+    output_dir = _check_output_dir(args.output)
+    if args.output and output_dir is None:
+        return EXIT_USAGE
+
     try:
         tools = probe.Tools(cfg["tools"])
     except FileNotFoundError as e:
@@ -260,7 +286,7 @@ def main(argv=None) -> int:
         keep = not bool(run_cfg["delete_original"])
     recycle = args.recycle or bool(run_cfg["use_recycle_bin"])
     _log_settings(cfg, encoder, args.adaptive, keep, recycle, workers,
-                  args.dry_run)
+                  args.dry_run, output_dir)
 
     store = ResultStore(config.resolve_run_path(cfg_dir, run_cfg["results_file"]))
     todo = _pick_todo(found, store, args.force)
@@ -283,6 +309,7 @@ def main(argv=None) -> int:
         recycle=recycle,
         keep=keep,
         show_progress=serial and not args.dry_run,
+        output_dir=output_dir,
     )
 
     if not ctx.dry_run:

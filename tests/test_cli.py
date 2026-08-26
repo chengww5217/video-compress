@@ -29,7 +29,7 @@ class ParserTests(unittest.TestCase):
         args = cli.build_parser().parse_args(
             ["a.mp4", "b.mkv", "--dry-run", "--no-recursive", "--no-adaptive",
              "--keep", "--recycle", "--force", "--workers", "3",
-             "--encoder", "x265"])
+             "--encoder", "x265", "-o", "/tmp/out"])
         self.assertEqual(args.paths, ["a.mp4", "b.mkv"])
         self.assertFalse(args.recursive)
         self.assertFalse(args.adaptive)
@@ -39,6 +39,7 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(args.force)
         self.assertEqual(args.workers, 3)
         self.assertEqual(args.encoder, "x265")
+        self.assertEqual(args.output, "/tmp/out")
 
     def test_encoder_is_not_a_hardcoded_choice(self):
         """编码器候选来自配置，argparse 不该先把没见过的名字拒掉。"""
@@ -255,6 +256,27 @@ class MainEarlyExitTests(unittest.TestCase):
         p = self.write_cfg("")
         rc = cli.main([str(self.root / "nope"), "--config", str(p)])
         self.assertEqual(rc, cli.EXIT_USAGE)
+
+    def test_output_dir_must_exist(self):
+        """-o 指向不存在的目录：退出并告警，不把产物落到用户没预期的地方。"""
+        p = self.write_cfg("")
+        rc = cli.main([str(self.root), "-o", str(self.root / "nope"),
+                       "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_USAGE)
+
+    def test_output_dir_must_be_a_directory(self):
+        f = self.root / "a-file"
+        f.write_bytes(b"x")
+        p = self.write_cfg("")
+        rc = cli.main([str(self.root), "-o", str(f), "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_USAGE)
+
+    def test_valid_output_dir_is_accepted(self):
+        out = self.root / "out"
+        out.mkdir()
+        p = self.write_cfg("")
+        rc = cli.main([str(self.root), "-o", str(out), "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_OK)
 
     def test_partially_invalid_paths_still_process_the_rest(self):
         vid = self.root / "a.mp4"

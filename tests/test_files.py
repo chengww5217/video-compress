@@ -2,15 +2,18 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import errno
 import tempfile
 import threading
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import helpers
 from vcompress import files
 from vcompress.files import (OutputRegistry, clean_stale_tmp, gather_files,
-                             keep_failed_output, resolve_final_path, tmp_path)
+                             keep_failed_output, move_file,
+                             resolve_final_path, tmp_path)
 
 
 class TmpNamingTests(unittest.TestCase):
@@ -218,6 +221,53 @@ class ResolveFinalPathTests(unittest.TestCase):
         final = resolve_final_path(src, target, ".mkv", "av1", keep=False,
                                    taken=[target])
         self.assertEqual(final, self.root / "a.av1.mkv")
+
+    def test_fallback_stays_in_the_targets_directory(self):
+        """输出目录（-o）模式下备用名必须落在输出目录，不是源文件旁边。"""
+        src = self.touch("a.mp4")
+        out = self.root / "out"
+        out.mkdir()
+        (out / "a.mkv").write_bytes(b"x")
+        final = resolve_final_path(src, out / "a.mkv", ".mkv", "av1",
+                                   keep=False)
+        self.assertEqual(final, out / "a.av1.mkv")
+
+
+class MoveFileTests(unittest.TestCase):
+    """跨盘搬迁：os.replace 过不去就退化为复制后删除。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_same_volume_move(self):
+        src = self.root / "a.tmp.mkv"
+        src.write_bytes(b"payload")
+        dst = self.root / "a.mkv"
+        move_file(src, dst)
+        self.assertEqual(dst.read_bytes(), b"payload")
+        self.assertFalse(src.exists())
+
+    def test_cross_device_falls_back_to_copy(self):
+        src = self.root / "a.tmp.mkv"
+        src.write_bytes(b"payload")
+        dst = self.root / "a.mkv"
+        boom = OSError(errno.EXDEV, "Invalid cross-device link")
+        with mock.patch("vcompress.files.os.replace", side_effect=boom):
+            move_file(src, dst)
+        self.assertEqual(dst.read_bytes(), b"payload")
+        self.assertFalse(src.exists())
+
+    def test_unrelated_errors_are_not_silently_copied_over(self):
+        src = self.root / "a.tmp.mkv"
+        src.write_bytes(b"payload")
+        boom = OSError(errno.EACCES, "Permission denied")
+        with mock.patch("vcompress.files.os.replace", side_effect=boom):
+            with self.assertRaises(OSError):
+                move_file(src, self.root / "a.mkv")
 
 
 class OutputRegistryTests(unittest.TestCase):

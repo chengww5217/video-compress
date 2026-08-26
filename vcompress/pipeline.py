@@ -4,7 +4,6 @@
 """
 
 import logging
-import os
 import threading
 import time
 from collections import Counter
@@ -63,6 +62,8 @@ class RunContext:
     recycle: bool = False
     keep: bool = False
     show_progress: bool = False
+    # None = 源文件所在目录；指定后所有产物落到这个目录（-o/--output）
+    output_dir: "Path | None" = None
 
     @property
     def enc_cfg(self) -> dict:
@@ -119,7 +120,8 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
     printer = ProgressPrinter(src.name, ctx.show_progress)
     try:
         # 先把输出名定下来（并登记预留），别编码几小时后才发现名字冲突
-        target = src.with_suffix(ctx.out_ext)
+        target = ((ctx.output_dir / src.name).with_suffix(ctx.out_ext)
+                  if ctx.output_dir is not None else src.with_suffix(ctx.out_ext))
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
         crf, elapsed, picked = _encode(ctx, src, info, tmp, printer)
@@ -253,7 +255,7 @@ def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
     if in_place and ctx.recycle:
         # 原地替换时先把原文件送进回收站，os.replace 才不会直接毁掉它
         files.trash(src)
-    os.replace(tmp, final)
+    files.move_file(tmp, final)  # 输出目录可能在另一块盘上，os.replace 会垮
     if not ctx.keep and not in_place:
         files.delete_original(src, ctx.recycle)
 

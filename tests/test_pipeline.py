@@ -385,6 +385,39 @@ class TargetRecheckTests(PipelineTestCase):
         self.assertNotIn("没达到自适应目标", self.messages())
 
 
+class OutputDirTests(PipelineTestCase):
+    """-o/--output：产物落到指定目录，覆盖保护规则在目标目录里照常生效。"""
+
+    def setUp(self):
+        super().setUp()
+        self.out = self.root / "out"
+        self.out.mkdir()
+
+    def test_output_lands_in_the_given_directory(self):
+        _ctx, outcome = self.run_one(self.fake_encode(), output_dir=self.out)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual((self.out / "a.mkv").read_bytes(), self.encoded)
+        self.assertFalse((self.root / "a.mkv").exists(),
+                         "源目录里不该出现产物")
+        self.assertFalse(self.src.exists(), "默认非 keep：原文件压缩后删除")
+
+    def test_keep_mode_keeps_source_and_writes_copy_to_output_dir(self):
+        _ctx, outcome = self.run_one(self.fake_encode(), keep=True,
+                                     output_dir=self.out)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertTrue(self.src.exists())
+        self.assertTrue((self.out / "a.mkv").exists())
+
+    def test_name_conflict_falls_back_inside_the_output_dir(self):
+        (self.out / "a.mkv").write_bytes(b"precious")
+        _ctx, outcome = self.run_one(self.fake_encode(), output_dir=self.out)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual((self.out / "a.mkv").read_bytes(), b"precious")
+        self.assertEqual((self.out / "a.av1.mkv").read_bytes(), self.encoded)
+        self.assertFalse((self.root / "a.av1.mkv").exists(),
+                         "备用名不该落回源目录")
+
+
 class ContextTests(unittest.TestCase):
     def test_context_rejects_unknown_attributes(self):
         """dataclass 而不是空壳类：拼错属性名要立刻炸，而不是运行时才发现。"""
