@@ -45,6 +45,12 @@ def gather_files(paths, recursive: bool, extensions: set):
         if p.is_file():
             if p.suffix.lower() in extensions and not is_intermediate(p.name):
                 files.append(p)
+            elif is_intermediate(p.name):
+                # 目录扫描时静默排除中途产物是设计本意；但用户显式点了名，
+                # 被跳过必须吱声
+                log.warning(f"{em(p.name)} 是本工具的中途产物，不作输入，已忽略")
+            else:
+                log.warning(f"{em(p.name)} 的扩展名不在支持列表里，已忽略")
         elif p.is_dir():
             it = p.rglob("*") if recursive else p.glob("*")
             for f in it:

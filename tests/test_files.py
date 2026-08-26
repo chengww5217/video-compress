@@ -87,6 +87,20 @@ class GatherFilesTests(unittest.TestCase):
         self.assertEqual(self.names(found), {"a.mp4"})
         self.assertTrue(any("ghost.mp4" in line for line in cm.output))
 
+    def test_explicit_unsupported_extension_warns(self):
+        with self.assertLogs("vcompress", level="WARNING") as cm:
+            found = gather_files([self.root / "note.txt"], False, {".mp4"})
+        self.assertEqual(found, [])
+        self.assertTrue(any("note.txt" in line for line in cm.output))
+
+    def test_explicit_intermediate_file_warns(self):
+        """目录扫描静默排除中途产物是对的，显式点名则被跳过必须留痕。"""
+        f = self.root / "e.mp4.tmp.mkv"
+        with self.assertLogs("vcompress", level="WARNING") as cm:
+            found = gather_files([f], False, {".mp4", ".mkv"})
+        self.assertEqual(found, [])
+        self.assertTrue(any("e.mp4.tmp.mkv" in line for line in cm.output))
+
 
 class CleanStaleTmpTests(unittest.TestCase):
     def setUp(self):
