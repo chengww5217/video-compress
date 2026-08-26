@@ -3,6 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import logging
+import re
 import tempfile
 import unittest
 from unittest import mock
@@ -26,9 +27,15 @@ class ConsoleFormatterTests(unittest.TestCase):
     def fmt(self, level, msg, color=True):
         return logfmt.ConsoleFormatter(color).format(record(level, msg))
 
+    def test_plain_mode_matches_the_file_format_exactly(self):
+        """控制台与文件共用同一份布局：剥掉颜色转义后逐字节一致。"""
+        rec = record(logging.WARNING, f"压缩 {logfmt.em('a.mkv')}")
+        self.assertEqual(logfmt.ConsoleFormatter(False).format(rec),
+                         logfmt.FileFormatter().format(rec))
+
     def test_plain_mode_has_no_escape_codes_or_markers(self):
         out = self.fmt(logging.INFO, f"压缩 {logfmt.em('a.mkv')}", color=False)
-        self.assertIn("信息 压缩 a.mkv", out)
+        self.assertRegex(out, r"^\d{4} \d{2}:\d{2}:\d{2} INFO\s+压缩 a\.mkv$")
         self.assertNotIn("\x1b", out)
         self.assertNotIn(logfmt.EM_START, out)
 
@@ -39,13 +46,18 @@ class ConsoleFormatterTests(unittest.TestCase):
         self.assertNotIn(logfmt.EM_END, out)
         self.assertIn("a.mkv", out)
 
+    def test_colored_mode_keeps_the_file_layout_underneath(self):
+        out = self.fmt(logging.WARNING, "小心")
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", out)
+        self.assertRegex(plain, r"^\d{4} \d{2}:\d{2}:\d{2} WARNING 小心$")
+
     def test_levels_use_different_colors(self):
         warn = self.fmt(logging.WARNING, "小心")
         err = self.fmt(logging.ERROR, "炸了")
         self.assertIn(logfmt.YELLOW, warn)
-        self.assertIn("警告", warn)
+        self.assertIn("WARNING", warn)
         self.assertIn(logfmt.RED, err)
-        self.assertIn("错误", err)
+        self.assertIn("ERROR", err)
 
     def test_status_tag_is_colored_separately(self):
         out = self.fmt(logging.INFO, "[完成] a.mkv：省下 50%")

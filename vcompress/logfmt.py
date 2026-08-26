@@ -1,15 +1,16 @@
-"""日志呈现：控制台上色、重点高亮，文件日志的会话分隔。
+"""日志呈现：控制台与文件同一份文本格式，控制台额外上色。
 
 日志文本一律用中文——这个工具是人看着跑的，出问题时要一眼读懂。
 
-控制台和文件两路刻意分工：
+两路的文本布局完全一致（`0826 17:34:10 INFO    消息`），差别只在能力和详细度：
 
-* **控制台**：INFO 起，带颜色。级别用颜色区分，行首的 `[编码]`/`[完成]` 这类
-  状态标签单独上色，消息里用 `em()` 包住的重点值（文件名、CRF、VMAF、体积）
-  加粗高亮。不是终端（重定向到文件、CI）或设了 `NO_COLOR` 时自动退化成纯文本。
-* **文件**：DEBUG 起，不上色（ANSI 转义写进文件只会碍事），带月日时间。文件是
-  追加写的，所以每次启动先空几行、打一条 `==== 0825 21:30:01 启动程序 ====`，
-  翻历史时好找到某一次运行从哪儿开始。
+* **控制台**：INFO 起，终端支持时上色——级别、行首的 `[编码]`/`[完成]` 这类
+  状态标签、消息里用 `em()` 包住的重点值（文件名、CRF、VMAF、体积）加粗高亮。
+  颜色只是装饰，剥掉转义后文本和文件日志逐字节一致。不是终端（重定向到
+  文件、CI）或设了 `NO_COLOR` 时自动退化成纯文本。
+* **文件**：DEBUG 起，不上色（ANSI 转义写进文件只会碍事）。文件是追加写的，
+  所以每次启动先空几行、打一条 `==== 0825 21:30:01 启动程序 ====`，翻历史时
+  好找到某一次运行从哪儿开始。
 """
 
 import logging
@@ -34,13 +35,14 @@ BLUE = "\x1b[34m"
 MAGENTA = "\x1b[35m"
 CYAN = "\x1b[36m"
 
-# 级别 -> (中文标签, 整行颜色, 高亮颜色)
+# 级别 -> (整行颜色, 高亮颜色)。级别名本身用英文（INFO/WARNING/...），
+# 与文件日志保持同一个布局
 LEVEL_STYLES = {
-    logging.DEBUG: ("调试", DIM, ""),
-    logging.INFO: ("信息", "", BOLD + CYAN),
-    logging.WARNING: ("警告", YELLOW, BOLD + YELLOW),
-    logging.ERROR: ("错误", RED, BOLD + RED),
-    logging.CRITICAL: ("致命", BOLD + RED, BOLD + RED),
+    logging.DEBUG: (DIM, ""),
+    logging.INFO: ("", BOLD + CYAN),
+    logging.WARNING: (YELLOW, BOLD + YELLOW),
+    logging.ERROR: (RED, BOLD + RED),
+    logging.CRITICAL: (BOLD + RED, BOLD + RED),
 }
 
 # 行首状态标签的颜色。标签本身是消息的一部分（文件日志里照样能 grep），
@@ -104,22 +106,35 @@ def _enable_windows_ansi() -> bool:
         return False
 
 
+def _plain_line(formatter: logging.Formatter, record: logging.LogRecord) -> str:
+    """控制台与文件共用的纯文本行：`0826 17:34:10 INFO    消息`。
+
+    格式只有这一份（以文件格式为准），控制台的无颜色路径必须与之逐字节一致。
+    """
+    stamp = time.strftime("%m%d %H:%M:%S", formatter.converter(record.created))
+    message = strip_marks(record.getMessage())
+    if record.exc_info:
+        message += "\n" + formatter.formatException(record.exc_info)
+    return f"{stamp} {record.levelname:<7} {message}"
+
+
 class ConsoleFormatter(logging.Formatter):
-    """时间 + 中文级别 + 消息；带色时高亮状态标签和重点值。"""
+    """纯文本布局与文件日志一致；终端支持时给级别、状态标签和重点值上色。"""
 
     def __init__(self, color: bool):
         super().__init__("%(message)s")
         self.color = color
 
     def format(self, record: logging.LogRecord) -> str:
-        stamp = time.strftime("%H:%M:%S", self.converter(record.created))
-        label, line_style, em_style = LEVEL_STYLES.get(
-            record.levelno, ("信息", "", BOLD))
+        if not self.color:
+            return _plain_line(self, record)
+
+        stamp = time.strftime("%m%d %H:%M:%S", self.converter(record.created))
+        line_style, em_style = LEVEL_STYLES.get(record.levelno, ("", BOLD))
+        label = f"{record.levelname:<7}"
         message = record.getMessage()
         if record.exc_info:
             message += "\n" + self.formatException(record.exc_info)
-        if not self.color:
-            return f"{stamp} {label} {strip_marks(message)}"
 
         tag = ""
         m = _TAG_RE.match(strip_marks(message))
@@ -143,17 +158,13 @@ class ConsoleFormatter(logging.Formatter):
 
 
 class FileFormatter(logging.Formatter):
-    """文件里不上色，但要有日期：这份日志是跨天追加的。"""
+    """文件里不上色；布局与控制台共用 _plain_line，天然一致。"""
 
     def __init__(self):
         super().__init__("%(message)s")
 
     def format(self, record: logging.LogRecord) -> str:
-        stamp = time.strftime("%m%d %H:%M:%S", self.converter(record.created))
-        message = strip_marks(record.getMessage())
-        if record.exc_info:
-            message += "\n" + self.formatException(record.exc_info)
-        return f"{stamp} {record.levelname:<7} {message}"
+        return _plain_line(self, record)
 
 
 def session_banner(argv=None) -> str:
