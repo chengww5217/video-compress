@@ -122,14 +122,16 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
         target = src.with_suffix(ctx.out_ext)
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
-        crf, elapsed = _encode(ctx, src, info, tmp, printer)
+        crf, elapsed, picked = _encode(ctx, src, info, tmp, printer)
         printer.close()
 
         out_info = probe.probe(ctx.tools, tmp)
-        score = verify.run_all(ctx.tools, src, tmp, info, out_info, ctx.cfg,
-                               log=log, lossless_codec=ctx.lossless_codec)
-        if score is not None:
-            log.info(f"[校验] {em(src.name)}：VMAF {em(f'{score:.2f}')}")
+        mean, worst = verify.run_all(ctx.tools, src, tmp, info, out_info,
+                                     ctx.cfg, log=log,
+                                     lossless_codec=ctx.lossless_codec)
+        if mean is not None:
+            log.info(f"[校验] {em(src.name)}：VMAF {em(f'{mean:.2f}')}")
+        _warn_below_target(ctx, src, picked, mean, worst)
 
         saved = _commit(ctx, src, tmp, target, info, crf, elapsed)
         return ctx.stats.record(OK, saved)
@@ -149,12 +151,13 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
 
 def _encode(ctx: RunContext, src: Path, info, tmp: Path,
             printer: ProgressPrinter):
-    """跑主编码，返回 (实际使用的 crf, 耗时秒)。"""
+    """跑主编码，返回 (实际使用的 crf, 耗时秒, 搜索结论或 None)。"""
     supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg, ctx.enc_cfg["codec"])
     enc_cfg = caps.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
 
     # 固定 CRF 也走一遍量化：配置里写 20.5 就该按 20.5 编，而不是被截成 20
     crf = encode.quantize_crf(to_float(enc_cfg["crf"], 28))
+    picked = None
     if ctx.adaptive_enabled and info.duration > 0:
         picked = adaptive.pick_crf(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
@@ -179,7 +182,32 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     encode.run_encode(cmd, info.duration, printer)
     elapsed = time.monotonic() - t0
     printer(100.0)
-    return crf, elapsed
+    return crf, elapsed, picked
+
+
+def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst) -> None:
+    """自适应产物按 target_vmaf 复核全片抽检，低于目标必须留痕。
+
+    [verify] 的阈值是给固定 CRF 兜底的灾难性失败线；自适应承诺的是
+    target_vmaf。两边抽样位置不同，搜索达标不代表全片达标。产物仍按通过
+    处理（它过了 [verify] 的闸门），但画质的欠账不能无声无息。
+    """
+    if picked is None or mean is None:
+        return
+    target = to_float(ctx.cfg["adaptive"].get("target_vmaf"), 95.0)
+    low = []
+    if mean < target:
+        low.append(f"均值 {mean:.2f}")
+    if worst is not None and worst < target:
+        low.append(f"最低段 {worst:.2f}")
+    if not low:
+        return
+    log.warning(
+        f"[校验] {em(src.name)}：全片抽检 VMAF 没达到自适应目标 "
+        f"{em(str(target))}（{'、'.join(low)}；搜索时样本最差 "
+        f"{picked.worst_vmaf:.2f}）。产物仍按通过保留，"
+        f"介意的话删掉产物加 --force 重压"
+    )
 
 
 def _reject_unworthy(ctx: RunContext, info, picked) -> None:

@@ -425,7 +425,7 @@ class IntegrationTests(unittest.TestCase):
 
         cfg = {"verify": {"vmaf_enabled": True, "vmaf_segments": 2,
                           "vmaf_sample_seconds": 3.0, "vmaf_threshold": 90.0}}
-        mean, msg = verify.vmaf_spot_check(tools, ref, dist, 12.0, cfg)
+        mean, _worst, msg = verify.vmaf_spot_check(tools, ref, dist, 12.0, cfg)
         self.assertIsNotNone(mean, msg)
         self.assertGreater(mean, 90.0,
                            "misaligned sampling would collapse the score")

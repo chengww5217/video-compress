@@ -150,7 +150,7 @@ class RunAllTests(unittest.TestCase):
         self.out.write_bytes(b"x" * 40_000)
         self.calls = []
         self.decode = None
-        self.spot = (96.0, "")
+        self.spot = (96.0, 95.0, "")
         self.orig_decode = verify.decode_errors
         self.orig_spot = verify.vmaf_spot_check
         verify.decode_errors = self.fake_decode
@@ -174,7 +174,9 @@ class RunAllTests(unittest.TestCase):
                               self.orig, self.out_info, self.cfg)
 
     def test_happy_path_returns_the_score(self):
-        self.assertAlmostEqual(self.run_all(), 96.0)
+        mean, worst = self.run_all()
+        self.assertAlmostEqual(mean, 96.0)
+        self.assertAlmostEqual(worst, 95.0)
         self.assertEqual(self.calls, ["decode", "vmaf"])
 
     def test_decode_failure_stops_before_the_expensive_check(self):
@@ -205,18 +207,18 @@ class RunAllTests(unittest.TestCase):
         self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
 
     def test_low_vmaf_is_a_failure(self):
-        self.spot = (70.0, "vmaf mean 70.00 below threshold 93.0")
+        self.spot = (70.0, 68.0, "vmaf mean 70.00 below threshold 93.0")
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
         self.assertIn("below threshold", str(cm.exception))
 
     def test_unavailable_vmaf_only_warns(self):
-        self.spot = (None, "libvmaf failed: no such filter")
-        self.assertIsNone(self.run_all())
+        self.spot = (None, None, "libvmaf failed: no such filter")
+        self.assertEqual(self.run_all(), (None, None))
 
     def test_disabled_vmaf_passes(self):
-        self.spot = (None, "")
-        self.assertIsNone(self.run_all())
+        self.spot = (None, None, "")
+        self.assertEqual(self.run_all(), (None, None))
 
 
 class VmafModelSelectionTests(unittest.TestCase):
@@ -266,21 +268,26 @@ class VmafSpotCheckTests(unittest.TestCase):
                                       Path("b.mkv"), duration, self.cfg,
                                       fps=fps)
 
+    def check_mean_msg(self, duration=600.0, fps=0.0):
+        mean, _worst, msg = self.check(duration, fps)
+        return mean, msg
+
     def test_disabled_is_not_reported_as_unavailable(self):
         self.cfg["verify"]["vmaf_enabled"] = False
-        self.assertEqual(self.check(), (None, ""))
+        self.assertEqual(self.check(), (None, None, ""))
         self.assertEqual(self.extracted, [])
 
     def test_mean_above_threshold_passes(self):
-        mean, msg = self.check()
+        mean, worst, msg = self.check()
         self.assertAlmostEqual(mean, 95.0)
+        self.assertAlmostEqual(worst, 94.0)
         self.assertEqual(msg, "")
         self.assertEqual(len(self.extracted), 4, "2 segments x ref+dist")
 
     def test_mean_below_threshold_reports_every_segment(self):
         self.cfg["verify"]["vmaf_min_segment"] = 0.0
         self.scores = [80.0, 82.0]
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 81.0)
         self.assertIn("低于阈值", msg)
         self.assertIn("80.00", msg)
@@ -290,7 +297,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         """99/99/81 的均值是 93，够过阈值，但那一段是看得出来的。"""
         self.cfg["verify"]["vmaf_segments"] = 3
         self.scores = [99.0, 99.0, 81.0]
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 93.0)
         self.assertIn("低于单段下限", msg)
         self.assertIn("81.00", msg)
@@ -299,25 +306,25 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.cfg["verify"]["vmaf_segments"] = 3
         self.cfg["verify"]["vmaf_min_segment"] = 0.0
         self.scores = [99.0, 99.0, 81.0]
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 93.0)
         self.assertEqual(msg, "")
 
     def test_zero_segments_still_measures_once(self):
         self.cfg["verify"]["vmaf_segments"] = 0
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 96.0)
         self.assertEqual(msg, "")
 
     def test_garbage_segment_count_falls_back_to_default(self):
         self.cfg["verify"]["vmaf_segments"] = "three"
         self.scores = [96.0, 96.0, 96.0]
-        mean, _ = self.check()
+        mean, _ = self.check_mean_msg()
         self.assertEqual(len(self.extracted), 6)
         self.assertAlmostEqual(mean, 96.0)
 
     def test_unknown_duration_is_reported(self):
-        mean, msg = self.check(duration=0.0)
+        mean, msg = self.check_mean_msg(duration=0.0)
         self.assertIsNone(mean)
         self.assertIn("时长", msg)
         self.assertEqual(self.extracted, [])
@@ -327,7 +334,7 @@ class VmafSpotCheckTests(unittest.TestCase):
             raise vmaf.VmafError("libvmaf failed: no such filter")
 
         vmaf.measure = boom
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertIsNone(mean)
         self.assertIn("no such filter", msg)
 
@@ -341,7 +348,7 @@ class VmafSpotCheckTests(unittest.TestCase):
         """片子比样本还短时几段会挤到同一个切点，量一次就够。"""
         self.cfg["verify"]["vmaf_segments"] = 5
         self.cfg["verify"]["vmaf_sample_seconds"] = 20
-        mean, msg = self.check(duration=10.0)
+        mean, msg = self.check_mean_msg(duration=10.0)
         self.assertEqual(msg, "")
         self.assertAlmostEqual(mean, 96.0)
         self.assertEqual(len(self.extracted), 2,
@@ -369,7 +376,7 @@ class VmafSpotCheckTests(unittest.TestCase):
             return 95.0 if shift else 40.0
 
         vmaf.measure = score
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 95.0)
         self.assertEqual(msg, "")
         self.assertIn(1, self.shifts)
@@ -377,7 +384,7 @@ class VmafSpotCheckTests(unittest.TestCase):
     def test_genuinely_bad_segment_still_fails(self):
         """挪帧也救不回来的低分说明画质真的坏了，必须照旧判失败。"""
         vmaf.measure = lambda ff, dist, ref, shift=0, **kw: 70.0
-        mean, msg = self.check()
+        mean, msg = self.check_mean_msg()
         self.assertAlmostEqual(mean, 70.0)
         self.assertIn("70.00", msg)
 
@@ -387,7 +394,7 @@ class VmafSpotCheckTests(unittest.TestCase):
 
     def test_failure_message_says_where_it_measured(self):
         self.scores = [80.0, 82.0]
-        _mean, msg = self.check(duration=600.0)
+        _mean, msg = self.check_mean_msg(duration=600.0)
         self.assertRegex(msg, r"80\.00@\d+s")
         self.assertRegex(msg, r"82\.00@\d+s")
 

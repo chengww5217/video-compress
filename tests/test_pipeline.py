@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import logging
 import tempfile
 import unittest
 from pathlib import Path
@@ -70,7 +71,7 @@ class PipelineTestCase(unittest.TestCase):
         def probe_side_effect(tools, path):
             return self.info if Path(path) == self.src else out
 
-        run_all = (mock.Mock(return_value=95.0) if verify_ok
+        run_all = (mock.Mock(return_value=(95.0, 94.5)) if verify_ok
                    else mock.Mock(side_effect=verify.VerifyError("vmaf 40")))
         return (
             mock.patch.object(pipeline.probe, "probe",
@@ -321,6 +322,67 @@ class FractionalCrfTests(PipelineTestCase):
     def test_record_keeps_the_fraction(self):
         self.capture(adaptive.CrfChoice(30.25, 400, True, 96.0))
         self.assertEqual(self.store.last(self.src)["crf"], 30.25)
+
+
+class TargetRecheckTests(PipelineTestCase):
+    """自适应产物要按 target_vmaf 复核全片抽检：欠账必须留痕，但不否决产物。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["adaptive"]["enabled"] = True
+        self.cfg["adaptive"]["target_vmaf"] = 95.0
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              audio_codecs=[], audio_bitrates=[],
+                              audio_channels=[])
+        self.logs = []
+        self.handler = logging.Handler()
+        self.handler.emit = self.logs.append
+        logging.getLogger("vcompress").addHandler(self.handler)
+
+    def tearDown(self):
+        logging.getLogger("vcompress").removeHandler(self.handler)
+        super().tearDown()
+
+    def messages(self):
+        return "\n".join(r.getMessage() for r in self.logs)
+
+    def run_with_spot(self, spot):
+        ctx = self.ctx()
+        p1, p2, _p3 = self.patches(self.fake_encode())
+        run_all = mock.Mock(return_value=spot)
+        with p1, p2, \
+                mock.patch.object(pipeline.verify, "run_all", run_all), \
+                mock.patch.object(pipeline.adaptive, "pick_crf",
+                                  return_value=adaptive.CrfChoice(
+                                      30, 400, True, 95.02)):
+            outcome = pipeline.process_file(ctx, self.src)
+        return outcome
+
+    def test_below_target_warns_but_still_passes(self):
+        outcome = self.run_with_spot((94.99, 94.39))
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded,
+                         "产物过了 [verify] 闸门，仍按通过落地")
+        msg = self.messages()
+        self.assertIn("没达到自适应目标", msg)
+        self.assertIn("94.99", msg)
+        self.assertIn("94.39", msg)
+        self.assertIn("95.02", msg)
+
+    def test_meeting_target_stays_quiet(self):
+        outcome = self.run_with_spot((95.5, 95.1))
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertNotIn("没达到自适应目标", self.messages())
+
+    def test_fixed_crf_has_no_target_to_recheck(self):
+        self.cfg["adaptive"]["enabled"] = False
+        ctx = self.ctx()
+        p1, p2, _p3 = self.patches(self.fake_encode())
+        run_all = mock.Mock(return_value=(93.5, 91.0))
+        with p1, p2, mock.patch.object(pipeline.verify, "run_all", run_all):
+            outcome = pipeline.process_file(ctx, self.src)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertNotIn("没达到自适应目标", self.messages())
 
 
 class ContextTests(unittest.TestCase):

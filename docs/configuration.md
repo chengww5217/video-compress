@@ -91,6 +91,8 @@ Opus 码率以 `opus_kbps`(160k) 作为**立体声**基准按声道数缩放：�
 
 检查按「先便宜后昂贵」的顺序跑：解码、时长、体积、色彩元数据都过了才会去做最贵的 VMAF 抽检。任何一项不过都会删除临时文件并保留原文件，不会出现"压坏了还删了原件"的情况。ffmpeg 构建里没有 libvmaf 时抽检会跳过并打警告，其余检查照常执行。
 
+跑过自适应搜索的产物还会按 `target_vmaf` 复核一次抽检结果：搜索和校验的抽样位置不同，搜索达标不代表全片达标。均值或最低段低于目标时产物仍按通过保留（它过了上面这些闸门），但会打一条 WARNING 留痕，介意可以删掉产物加 `--force` 重压。
+
 VMAF 抽检的判定细节、色彩/HDR 比对原理见 [architecture.md](architecture.md#校验)，`keep_failed_output` 见下。
 
 `color_check`（默认开）比对 `color_primaries`/`color_transfer`/`color_space`/`color_range` 四项，以及 HDR10 母版信息（mastering display / content light level）、HDR10+、Dolby Vision RPU 是否还在。这项不能交给 VMAF：元数据丢了但像素值不变时 VMAF 照样打 99 分，播放器却会把 BT.2020/PQ 的片子按 SDR 显示，画面发灰——那不是"视觉无损"。源本身没标的项不作要求（编码器补默认值不算退化）。编码时也会把源的四项色彩属性显式写给编码器；新版 ffmpeg 本来就会自动传递，显式写是给老构建兜底。

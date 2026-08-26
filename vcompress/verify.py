@@ -144,16 +144,21 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     cfg, log=None, fps: float = 0.0,
                     lossless_codec: str = "libx264", model: str = ""):
+    """返回 (均值, 最低段, 失败原因)；量不出来时前两个是 None。
+
+    最低段也要带出去：自适应校验想按 target_vmaf 复核，[verify] 的单段下限
+    是另一套更松的口径，调用方需要原始数据。
+    """
     vcfg = cfg["verify"]
     if not vcfg.get("vmaf_enabled", True):
-        return None, ""
+        return None, None, ""
     segments = max(1, to_int(vcfg.get("vmaf_segments"), 3))
     seconds = to_float(vcfg.get("vmaf_sample_seconds"), 20.0)
     threshold = to_float(vcfg.get("vmaf_threshold"), 93.0)
     if seconds <= 0:
         seconds = 20.0
     if duration <= 0:
-        return None, "不知道时长，选不了抽样点"
+        return None, None, "不知道时长，选不了抽样点"
 
     records = []
     # 两个文件用同一批切点，且切在帧间隙里，抽出的段才逐帧对应
@@ -176,33 +181,33 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                     log.debug(f"[校验] 第 {i + 1} 段（{start:.1f}s 处）VMAF {score:.2f}")
                 records.append((start, score))
             except vmaf.VmafError as e:
-                return None, str(e)
+                return None, None, str(e)
     if not records:
-        return None, "一段 VMAF 都没量出来"
+        return None, None, "一段 VMAF 都没量出来"
     mean = sum(s for _t, s in records) / len(records)
     floor = to_float(vcfg.get("vmaf_min_segment"), 0.0)
     worst_t, worst = min(records, key=lambda r: r[1])
     # 段间取算术平均会掩盖单段崩掉：99/99/81 的均值是 93，照样通过，但那 81 分
     # 的十几分钟是看得出来的。所以除了均值，再给单段设一条下限。
     if floor > 0 and worst < floor:
-        return mean, (
+        return mean, worst, (
             f"{worst_t:.0f}s 处那段只有 VMAF {worst:.2f}，低于单段下限 "
             f"{floor}（各段：{_fmt_segments(records)}）"
         )
     if mean < threshold:
-        return mean, (
+        return mean, worst, (
             f"VMAF 均值 {mean:.2f} 低于阈值 {threshold}"
             f"（各段：{_fmt_segments(records)}）"
         )
-    return mean, ""
+    return mean, worst, ""
 
 
 def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             log=None, lossless_codec: str = "libx264"):
-    """跑完整校验链，任何硬失败抛 VerifyError；返回 VMAF 均值（可能为 None）。
+    """跑完整校验链，任何硬失败抛 VerifyError；返回 (VMAF 均值, 最低段)。
 
-    顺序是刻意的：先做便宜的（解码、时长、体积、色彩元数据），最后才做最贵的
-    VMAF 抽检。
+    两个值都可能为 None（量不了 VMAF 时）。顺序是刻意的：先做便宜的（解码、
+    时长、体积、色彩元数据），最后才做最贵的 VMAF 抽检。
     """
     if cfg["verify"].get("decode_check", True):
         errs = decode_errors(tools.ffmpeg, out)
@@ -218,14 +223,14 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     if not ok:
         raise VerifyError(msg)
 
-    score, msg = vmaf_spot_check(tools, src, out, orig_info.duration, cfg,
-                                 log=log, fps=orig_info.fps,
-                                 lossless_codec=lossless_codec,
-                                 model=vmaf_model(orig_info, cfg))
-    if msg and score is None:
+    mean, worst, msg = vmaf_spot_check(tools, src, out, orig_info.duration,
+                                       cfg, log=log, fps=orig_info.fps,
+                                       lossless_codec=lossless_codec,
+                                       model=vmaf_model(orig_info, cfg))
+    if msg and mean is None:
         # 构建里没有 libvmaf 之类的环境问题：告警但不否决，其余检查已经过了
         if log:
             log.warning(f"{src.name}：这次量不了 VMAF（{msg}），其余检查已通过，继续")
     elif msg:
         raise VerifyError(msg)
-    return score
+    return mean, worst
