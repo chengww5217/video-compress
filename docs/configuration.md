@@ -56,7 +56,7 @@ x265 节只显式写了 `aq-mode=3`（默认 2）和 `psy-rd=2.0`；`placebo` �
 - `min_saving_ratio = 0.15`：预估收益低于此值不压
 - `min_size_mb = 20`：小文件跳过
 - `skip_interlaced = true`：交错源（`field_order` 是 `tt/bb/tb/bt`）直接跳过，理由见「已知限制」
-- `extensions`：处理的容器白名单
+- `extensions`：处理的容器白名单。默认不含 `.ts`——它和 TypeScript 源码撞扩展名，扫到代码目录会把文本文件当 Transport Stream 收进来；真压 TS 流把 `".ts"` 加回列表即可
 - `tag_marker = "vcompress"`：写入和识别用的元数据标记名，两边始终一致
 
 ## 音频与其它轨道 `[audio]`

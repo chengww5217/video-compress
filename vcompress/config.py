@@ -19,7 +19,9 @@ DEFAULTS = {
     "skip": {
         "min_size_mb": 20,
         "min_saving_ratio": 0.15,
-        "extensions": [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts",
+        # .ts 不在默认列表里：它和 TypeScript 源码撞扩展名，扫代码目录时会把
+        # 一堆 .ts 源文件当成 Transport Stream 视频收集。真压 TS 流请在配置里加回
+        "extensions": [".mp4", ".mkv", ".mov", ".avi", ".webm",
                        ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"],
         "tag_marker": "vcompress",
         # 交错源（DVD / 电视台 rip）直接跳过：压过去会丢掉交错标记，属于

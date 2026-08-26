@@ -11,7 +11,9 @@ ffprobe = ""
 [skip]
 min_size_mb = 20          # 小于这个大小的直接跳过
 min_saving_ratio = 0.15   # 预估收益低于这个比例就不压
-extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".ts", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"]
+# 注意 .ts 故意不在列表里：它和 TypeScript 源码撞扩展名，扫到代码目录会误收一堆文本文件。
+# 真要压 Transport Stream 视频，把 ".ts" 加回来即可。
+extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"]
 tag_marker = "vcompress"  # 写进 comment 的标记，用来认出"已经压过了"
 skip_interlaced = true    # 交错源（DVD/电视台 rip）跳过：压过去会丢交错标记，播放器不再反交错
 
