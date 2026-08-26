@@ -79,6 +79,14 @@ class GatherFilesTests(unittest.TestCase):
         found = gather_files([f, f], False, {".mp4"})
         self.assertEqual(len(found), 1)
 
+    def test_missing_path_warns_instead_of_vanishing(self):
+        """不存在的路径必须留痕：用户可能把输出路径当成了第二个参数。"""
+        ghost = self.root / "ghost.mp4"
+        with self.assertLogs("vcompress", level="WARNING") as cm:
+            found = gather_files([ghost, self.root / "a.mp4"], False, {".mp4"})
+        self.assertEqual(self.names(found), {"a.mp4"})
+        self.assertTrue(any("ghost.mp4" in line for line in cm.output))
+
 
 class CleanStaleTmpTests(unittest.TestCase):
     def setUp(self):

@@ -51,6 +51,10 @@ def gather_files(paths, recursive: bool, extensions: set):
                 if f.is_file() and f.suffix.lower() in extensions \
                         and not is_intermediate(f.name):
                     files.append(f)
+        else:
+            # 不存在、盘暂不可用、断掉的符号链接都会落到这里。绝不能无声吞掉：
+            # 用户可能把输出路径当成第二个参数传进来，全吞掉时连排查线索都没有
+            log.warning(f"路径不存在或暂时不可用，已忽略：{em(str(p))}")
     seen = set()
     unique = []
     for f in files:
