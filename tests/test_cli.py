@@ -206,12 +206,20 @@ class PickTodoTests(unittest.TestCase):
         b = self.write("b.mp4", 10)
         self.store.add("ok", make_info(path=a, size=10), output=str(a),
                        new_size=10)
-        self.assertEqual(cli._pick_todo([a, b], self.store, force=False), [b])
+        todo, cached = cli._pick_todo([a, b], self.store, force=False)
+        self.assertEqual(todo, [b])
+        self.assertEqual(cached, 1)
 
     def test_force_keeps_everything(self):
         a = self.write("a.mp4", 10)
         self.store.add("skipped", make_info(path=a, size=10), reason="tagged")
-        self.assertEqual(cli._pick_todo([a], self.store, force=True), [a])
+        todo, cached = cli._pick_todo([a], self.store, force=True)
+        self.assertEqual(todo, [a])
+        self.assertEqual(cached, 0)
+
+    def test_cached_counts_are_never_negative(self):
+        todo, cached = cli._pick_todo([], self.store, force=False)
+        self.assertEqual((todo, cached), ([], 0))
 
 
 class MainEarlyExitTests(unittest.TestCase):

@@ -155,17 +155,24 @@ def _load_config(arg_value):
     return cfg, path, base
 
 
-def _pick_todo(files_found, store: ResultStore, force: bool) -> list:
+def _pick_todo(files_found, store: ResultStore, force: bool) -> tuple:
+    """过滤出真正要处理的文件，返回 (todo, 命中缓存的数)。
+
+    命中缓存的文件同样算「本次跳过」——它们在汇总里计数，只是不重新处理、
+    也不往 results.jsonl 里追加记录。
+    """
     todo = []
+    cached = 0
     for f in files_found:
-        cached = None if force else store.is_cached(f)
-        if cached:
+        rec = None if force else store.is_cached(f)
+        if rec:
+            cached += 1
             log.info(f"[缓存] {em(f.name)}：上次的结果是"
-                     f"{results.action_label(cached['action'])}，本次跳过"
+                     f"{results.action_label(rec['action'])}，本次跳过"
                      f"（要重跑加 --force）")
             continue
         todo.append(f)
-    return todo
+    return todo, cached
 
 
 def _run_serial(ctx: RunContext, todo) -> None:
@@ -301,8 +308,12 @@ def main(argv=None) -> int:
                   args.dry_run, output_dir)
 
     store = ResultStore(config.resolve_run_path(cfg_dir, run_cfg["results_file"]))
-    todo = _pick_todo(found, store, args.force)
-    if len(todo) != len(found):
+    todo, cached_skipped = _pick_todo(found, store, args.force)
+    if cached_skipped and todo:
+        log.info(f"待处理 {em(len(todo))} 个文件"
+                 f"（{cached_skipped} 个命中缓存跳过，"
+                 f"要重跑加 --force）")
+    elif todo:
         log.info(f"待处理 {em(len(todo))} 个文件")
 
     # 只有真正串行执行时进度条才不会被别的文件的输出打断
@@ -323,6 +334,9 @@ def main(argv=None) -> int:
         show_progress=serial and not args.dry_run,
         output_dir=output_dir,
     )
+    # 缓存命中的文件不进处理流程，但同样算「本次跳过」：汇总对得上
+    for _ in range(cached_skipped):
+        ctx.stats.record(pipeline.SKIPPED)
 
     if not ctx.dry_run:
         files.clean_stale_tmp(todo, ctx.out_ext)
