@@ -40,6 +40,15 @@ def failed_path(src: Path, out_ext: str) -> Path:
     return src.with_name(src.name + FAILED_INFIX + out_ext)
 
 
+def output_name(src: Path, encoder: str, out_ext: str) -> Path:
+    """默认输出名：<原名>.<编码器><扩展名>，如 a.mp4 -> a.av1.mkv。
+
+    带上编码器后缀，同名不同容器的源（a.mp4、a.avi）压缩后不会撞名，
+    目录里也能一眼看出哪些是压过的、拿什么压的。
+    """
+    return src.with_name(f"{src.stem}.{encoder}{out_ext}")
+
+
 def gather_files(paths, recursive: bool, extensions: set):
     """收集要处理的文件，返回 (文件列表, 失效路径列表)。
 
@@ -128,11 +137,12 @@ def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
                        keep: bool, logger=None, taken=()) -> Path:
     """决定最终输出路径，任何情况下都不覆盖已存在的其它文件。
 
-    非 keep 模式下 target 正好是原文件时属于预期内的原地替换；其余情况只要
-    target 已被占用，就退让到 <名字>.<编码器><扩展名>，该名字也被占用则失败。
+    输出名默认已带编码器后缀（<名字>.<编码器><扩展名>）。target 已被占用
+    时依次退让：先补一个编码器后缀（target 本身还没标编码器时），再按
+    -2、-3…序号让位，全部被占才失败。
 
     `taken` 是「磁盘上还不存在、但已经被别的在处理文件预定了」的路径集合。
-    并发时 a.mp4 和 a.avi 的目标都是 a.mkv，只看磁盘会两个都放行。
+    并发时 a.mp4 和 a.avi 的目标都是 a.av1.mkv，只看磁盘会两个都放行。
     """
     reserved = {str(p) for p in taken}
 
@@ -142,17 +152,28 @@ def resolve_final_path(src: Path, target: Path, out_ext: str, encoder: str,
     in_place = not keep and same_path(target, src)
     if not busy(target) or (in_place and str(target) not in reserved):
         return target
-    # 备用名跟着 target 的目录走：输出目录（-o）模式下源目录不一定是目标目录
-    alt = target.with_name(f"{target.stem}.{encoder}{out_ext}")
-    if busy(alt):
-        raise RuntimeError(
-            f"输出名 {target.name} 已被占用，不覆盖已有文件"
-            f"（备用名 {alt.name} 也被占了）"
-        )
-    if logger:
-        logger.warning(f"{target.name} 已存在且不是源文件，改写到 "
-                       f"{em(alt.name)}")
-    return alt
+    # 目标名已被占用：先补编码器后缀（兼容旧式不带后缀的调用），
+    # 再被占就按 -2、-3…让位，绝不覆盖已有文件
+    base = target
+    if not base.stem.endswith(f".{encoder}"):
+        first = target.with_name(f"{target.stem}.{encoder}{out_ext}")
+        if not busy(first):
+            if logger:
+                logger.warning(f"{target.name} 已存在且不是源文件，改写到 "
+                               f"{em(first.name)}")
+            return first
+        base = first
+    for i in range(2, 10_000):
+        alt = base.with_name(f"{base.stem}-{i}{out_ext}")
+        if not busy(alt):
+            if logger:
+                logger.warning(f"{target.name} 已存在且不是源文件，改写到 "
+                               f"{em(alt.name)}")
+            return alt
+    raise RuntimeError(
+        f"输出名 {target.name} 已被占用，不覆盖已有文件"
+        f"（备选名也被占光了）"
+    )
 
 
 class OutputRegistry:

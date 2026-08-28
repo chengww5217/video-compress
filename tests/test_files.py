@@ -12,8 +12,29 @@ from unittest import mock
 import helpers
 from vcompress import files
 from vcompress.files import (OutputRegistry, clean_stale_tmp, gather_files,
-                             keep_failed_output, move_file,
+                             keep_failed_output, move_file, output_name,
                              resolve_final_path, tmp_path)
+
+
+class OutputNameTests(unittest.TestCase):
+    """默认输出名必须带编码器后缀：a.mp4 -> a.av1.mkv。"""
+
+    def test_mp4_source(self):
+        self.assertEqual(output_name(Path("/v/a.mp4"), "av1", ".mkv"),
+                         Path("/v/a.av1.mkv"))
+
+    def test_mkv_source_gets_a_distinct_name(self):
+        """同容器转码（a.mkv -> a.av1.mkv）不再原地替换，避免误删原文件。"""
+        self.assertEqual(output_name(Path("/v/a.mkv"), "av1", ".mkv"),
+                         Path("/v/a.av1.mkv"))
+
+    def test_multi_dot_name_keeps_the_stem(self):
+        self.assertEqual(output_name(Path("/v/movie.2024.mp4"), "av1", ".mkv"),
+                         Path("/v/movie.2024.av1.mkv"))
+
+    def test_other_encoder_name_is_used(self):
+        self.assertEqual(output_name(Path("/v/a.mp4"), "x265", ".mkv"),
+                         Path("/v/a.x265.mkv"))
 
 
 class TmpNamingTests(unittest.TestCase):
@@ -205,14 +226,21 @@ class ResolveFinalPathTests(unittest.TestCase):
         self.assertEqual(resolve_final_path(src, src, ".mkv", "av1", keep=True),
                          self.root / "a.av1.mkv")
 
-    def test_fallback_taken_raises(self):
+    def test_suffix_target_falls_back_to_numbered_name(self):
+        """默认名（a.av1.mkv）被占时按 -2、-3…让位，不能拼出双后缀。"""
         src = self.touch("a.mp4")
-        self.touch("a.mkv")
         self.touch("a.av1.mkv")
-        with self.assertRaises(RuntimeError) as cm:
-            resolve_final_path(src, self.root / "a.mkv", ".mkv", "av1",
-                               keep=False)
-        self.assertIn("已被占用", str(cm.exception))
+        final = resolve_final_path(src, self.root / "a.av1.mkv", ".mkv",
+                                   "av1", keep=False)
+        self.assertEqual(final, self.root / "a.av1-2.mkv")
+
+    def test_numbered_fallback_skips_taken_names(self):
+        src = self.touch("a.mp4")
+        self.touch("a.av1.mkv")
+        self.touch("a.av1-2.mkv")
+        final = resolve_final_path(src, self.root / "a.av1.mkv", ".mkv",
+                                   "av1", keep=False)
+        self.assertEqual(final, self.root / "a.av1-3.mkv")
 
     def test_reserved_target_is_treated_as_taken(self):
         """磁盘上还不存在但已被别的文件预定的名字同样不能用。"""
@@ -298,13 +326,27 @@ class OutputRegistryTests(unittest.TestCase):
         self.assertEqual(first, self.root / "a.mkv")
         self.assertEqual(second, self.root / "a.av1.mkv")
 
-    def test_third_collision_fails_instead_of_overwriting(self):
+    def test_third_collision_gets_a_numbered_name(self):
         for name in ("a.mp4", "a.avi", "a.ts"):
             self.touch(name)
-        self.claim(self.root / "a.mp4")
-        self.claim(self.root / "a.avi")
-        with self.assertRaises(RuntimeError):
-            self.claim(self.root / "a.ts")
+        first = self.claim(self.root / "a.mp4")
+        second = self.claim(self.root / "a.avi")
+        third = self.claim(self.root / "a.ts")
+        self.assertEqual(first, self.root / "a.mkv")
+        self.assertEqual(second, self.root / "a.av1.mkv")
+        self.assertEqual(third, self.root / "a.av1-2.mkv",
+                         "never overwrite; fall back to -2, -3…")
+
+    def test_default_names_collide_and_fall_back(self):
+        """默认名都是 a.av1.mkv 的两个源，第二个必须让位给 a.av1-2.mkv。"""
+        a = self.touch("a.mp4")
+        b = self.touch("a.mkv")
+        first = self.reg.claim(a, output_name(a, "av1", ".mkv"), ".mkv",
+                               "av1", keep=False)
+        second = self.reg.claim(b, output_name(b, "av1", ".mkv"), ".mkv",
+                                "av1", keep=False)
+        self.assertEqual(first, self.root / "a.av1.mkv")
+        self.assertEqual(second, self.root / "a.av1-2.mkv")
 
     def test_reclaiming_from_the_same_owner_is_stable(self):
         """同一个文件编码前后各定名一次，结果必须一致。"""

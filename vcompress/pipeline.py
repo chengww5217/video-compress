@@ -122,8 +122,9 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
     printer = ProgressPrinter(src.name, ctx.show_progress)
     try:
         # 先把输出名定下来（并登记预留），别编码几小时后才发现名字冲突
-        target = ((ctx.output_dir / src.name).with_suffix(ctx.out_ext)
-                  if ctx.output_dir is not None else src.with_suffix(ctx.out_ext))
+        target = files.output_name(
+            ctx.output_dir / src.name if ctx.output_dir is not None else src,
+            ctx.encoder, ctx.out_ext)
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
         crf, elapsed, picked = _encode(ctx, src, info, tmp, printer)

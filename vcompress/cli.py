@@ -116,9 +116,10 @@ def build_parser() -> argparse.ArgumentParser:
                     help="删除原文件时进回收站")
     keep = ap.add_mutually_exclusive_group()
     keep.add_argument("--keep", action="store_true",
-                      help="保留原文件，只产出压缩副本（重名时输出改为 "
-                           "<名字>.<编码器><扩展名>，仍然重名就报错跳过而不是"
-                           "覆盖；这是默认行为）")
+                      help="保留原文件，只产出压缩副本（默认输出 "
+                           "<名字>.<编码器><扩展名>，例如 a.av1.mkv；"
+                           "重名时按 <名字>.<编码器>-2<扩展名>退让，绝不覆盖"
+                           "已有文件；这是默认行为）")
     keep.add_argument("--delete-original", action="store_true",
                       help="压缩副本校验通过后删除原文件（覆盖默认的保留行为）")
     return ap

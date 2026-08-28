@@ -91,7 +91,7 @@ class HappyPathTests(PipelineTestCase):
     def test_output_replaces_the_original(self):
         ctx, outcome = self.run_one(self.fake_encode())
         self.assertEqual(outcome, pipeline.OK)
-        self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded)
+        self.assertEqual((self.root / "a.av1.mkv").read_bytes(), self.encoded)
         self.assertFalse(self.src.exists(), "original must be gone")
         self.assertFalse(self.tmp_file().exists())
         self.assertEqual(ctx.stats.saved_bytes, 600)
@@ -100,7 +100,7 @@ class HappyPathTests(PipelineTestCase):
         ctx, outcome = self.run_one(self.fake_encode(), keep=True)
         self.assertEqual(outcome, pipeline.OK)
         self.assertTrue(self.src.exists())
-        self.assertTrue((self.root / "a.mkv").exists())
+        self.assertTrue((self.root / "a.av1.mkv").exists())
         rec = self.store.last(self.src)
         self.assertTrue(rec["kept"])
 
@@ -113,12 +113,13 @@ class HappyPathTests(PipelineTestCase):
         self.assertAlmostEqual(rec["saving"], 0.6, places=3)
 
     def test_existing_target_is_not_overwritten(self):
-        victim = self.root / "a.mkv"
+        victim = self.root / "a.av1.mkv"
         victim.write_bytes(b"precious")
         _ctx, outcome = self.run_one(self.fake_encode())
         self.assertEqual(outcome, pipeline.OK)
         self.assertEqual(victim.read_bytes(), b"precious")
-        self.assertEqual((self.root / "a.av1.mkv").read_bytes(), self.encoded)
+        self.assertEqual((self.root / "a.av1-2.mkv").read_bytes(),
+                         self.encoded)
 
 
 class InterruptTests(PipelineTestCase):
@@ -166,7 +167,7 @@ class FailureTests(PipelineTestCase):
         self.assertEqual(outcome, pipeline.FAILED)
         self.assertFalse(self.tmp_file().exists())
         self.assertTrue(self.src.exists())
-        self.assertFalse((self.root / "a.mkv").exists())
+        self.assertFalse((self.root / "a.av1.mkv").exists())
         rec = self.store.last(self.src)
         self.assertEqual(rec["action"], "failed")
         self.assertIn("vmaf 40", rec["error"])
@@ -258,7 +259,7 @@ class PreEncodeRejectTests(PipelineTestCase):
         ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 700, True, 96.0))
         self.assertEqual(outcome, pipeline.SKIPPED)
         self.assertTrue(self.src.exists(), "original must be untouched")
-        self.assertFalse((self.root / "a.mkv").exists())
+        self.assertFalse((self.root / "a.av1.mkv").exists())
         self.assertFalse(self.tmp_file().exists())
         self.assertIn("低于要求的", self.store.last(self.src)["reason"])
 
@@ -266,7 +267,7 @@ class PreEncodeRejectTests(PipelineTestCase):
         # 400 bps -> 500 字节，省 50%
         _ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 400, True, 96.0))
         self.assertEqual(outcome, pipeline.OK)
-        self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded)
+        self.assertEqual((self.root / "a.av1.mkv").read_bytes(), self.encoded)
 
     def test_unreachable_target_skips(self):
         _ctx, outcome = self.run_with_choice(
@@ -373,7 +374,7 @@ class TargetRecheckTests(PipelineTestCase):
     def test_below_target_warns_but_still_passes(self):
         outcome = self.run_with_spot((94.99, 94.39))
         self.assertEqual(outcome, pipeline.OK)
-        self.assertEqual((self.root / "a.mkv").read_bytes(), self.encoded,
+        self.assertEqual((self.root / "a.av1.mkv").read_bytes(), self.encoded,
                          "产物过了 [verify] 闸门，仍按通过落地")
         msg = self.messages()
         self.assertIn("没达到自适应目标", msg)
@@ -408,8 +409,8 @@ class OutputDirTests(PipelineTestCase):
     def test_output_lands_in_the_given_directory(self):
         _ctx, outcome = self.run_one(self.fake_encode(), output_dir=self.out)
         self.assertEqual(outcome, pipeline.OK)
-        self.assertEqual((self.out / "a.mkv").read_bytes(), self.encoded)
-        self.assertFalse((self.root / "a.mkv").exists(),
+        self.assertEqual((self.out / "a.av1.mkv").read_bytes(), self.encoded)
+        self.assertFalse((self.root / "a.av1.mkv").exists(),
                          "源目录里不该出现产物")
         self.assertFalse(self.src.exists(), "默认非 keep：原文件压缩后删除")
 
@@ -418,15 +419,16 @@ class OutputDirTests(PipelineTestCase):
                                      output_dir=self.out)
         self.assertEqual(outcome, pipeline.OK)
         self.assertTrue(self.src.exists())
-        self.assertTrue((self.out / "a.mkv").exists())
+        self.assertTrue((self.out / "a.av1.mkv").exists())
 
     def test_name_conflict_falls_back_inside_the_output_dir(self):
-        (self.out / "a.mkv").write_bytes(b"precious")
+        (self.out / "a.av1.mkv").write_bytes(b"precious")
         _ctx, outcome = self.run_one(self.fake_encode(), output_dir=self.out)
         self.assertEqual(outcome, pipeline.OK)
-        self.assertEqual((self.out / "a.mkv").read_bytes(), b"precious")
-        self.assertEqual((self.out / "a.av1.mkv").read_bytes(), self.encoded)
-        self.assertFalse((self.root / "a.av1.mkv").exists(),
+        self.assertEqual((self.out / "a.av1.mkv").read_bytes(), b"precious")
+        self.assertEqual((self.out / "a.av1-2.mkv").read_bytes(),
+                         self.encoded)
+        self.assertFalse((self.root / "a.av1-2.mkv").exists(),
                          "备用名不该落回源目录")
 
 

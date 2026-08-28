@@ -178,7 +178,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("[失败] garbage.mp4", r.stdout)
         self.assertFalse((self.root / "src.mp4").exists(),
                          "original should be deleted after success")
-        out = self.root / "src.mkv"
+        out = self.root / "src.av1.mkv"
         self.assertTrue(out.exists())
         self.assertEqual(list(self.root.glob("*.tmp.mkv")), [],
                          "temp file should be cleaned up")
@@ -207,8 +207,9 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(codecs, {"av1", "aac"})
 
     def test_b_rerun_skips_via_tag_even_with_force(self):
-        r = self.run_vcompress("--force", videos=("src.mkv", "garbage.mp4"))
-        self.assertIn("[跳过] src.mkv", r.stdout)
+        r = self.run_vcompress("--force", videos=("src.av1.mkv",
+                                                  "garbage.mp4"))
+        self.assertIn("[跳过] src.av1.mkv", r.stdout)
         self.assertIn("之前压过了", r.stdout)
 
     def test_c_keep_flag_preserves_originals(self):
@@ -219,7 +220,7 @@ class IntegrationTests(unittest.TestCase):
         self.assertIn("原文件保留", r.stdout)
         self.assertTrue((self.root / "keep_src.mp4").exists(),
                         "original must survive in keep mode")
-        self.assertTrue((self.root / "keep_src.mkv").exists())
+        self.assertTrue((self.root / "keep_src.av1.mkv").exists())
 
         records = [
             json.loads(line)
@@ -244,16 +245,17 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(original.stat().st_size, before,
                          "original must not be overwritten by same-name output")
 
-    def test_e_keep_collision_fails_instead_of_overwriting(self):
+    def test_e_keep_collision_falls_back_to_numbered_name(self):
         r = self.run_vcompress("--no-adaptive", "--keep", "--force",
                                videos=("same_ext.mkv",))
-        self.assertEqual(r.returncode, 1)
-        self.assertIn("[失败] same_ext.mkv", r.stdout)
-        self.assertIn("已被占用", r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("[完成] same_ext.mkv", r.stdout)
+        self.assertIn("改写到 same_ext.av1-2.mkv", r.stdout)
         prev = self.root / "same_ext.av1.mkv"
         self.assertTrue(prev.exists(), "previous output must not be touched")
         self.assertEqual(prev.stat().st_size, IntegrationTests.prev_output_size,
                          "previous output content must be unchanged")
+        self.assertTrue((self.root / "same_ext.av1-2.mkv").exists())
         self.assertEqual(list(self.root.glob("*.tmp.mkv")), [])
 
 
@@ -267,7 +269,6 @@ class IntegrationTests(unittest.TestCase):
                                videos=("collide.mp4",))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("[完成] collide.mp4", r.stdout)
-        self.assertIn("改写到 collide.av1.mkv", r.stdout)
 
         self.assertTrue(victim.exists(), "unrelated file must survive")
         self.assertEqual(victim.stat().st_size, before_size)
@@ -291,7 +292,7 @@ class IntegrationTests(unittest.TestCase):
         r = self.run_vcompress("--no-adaptive", videos=("tricky.mp4",))
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertIn("[完成] tricky.mp4", r.stdout)
-        out = self.root / "tricky.mkv"
+        out = self.root / "tricky.av1.mkv"
         self.assertTrue(out.exists())
 
         fp = Tools({"ffmpeg": "", "ffprobe": ""}).ffprobe
@@ -338,13 +339,13 @@ class IntegrationTests(unittest.TestCase):
 
         first = run("marker.mp4")
         self.assertEqual(first.returncode, 0, first.stdout)
-        out = self.root / "marker.mkv"
+        out = self.root / "marker.av1.mkv"
         self.assertTrue(out.exists())
         self.assertIn("zzmark",
                       self.ffprobe_field(out, "format_tags=COMMENT"))
 
-        second = run("marker.mkv")
-        self.assertIn("[跳过] marker.mkv", second.stdout)
+        second = run("marker.av1.mkv")
+        self.assertIn("[跳过] marker.av1.mkv", second.stdout)
         self.assertIn("已有 zzmark 标记", second.stdout)
 
     def test_j_relative_run_paths_follow_the_config_file(self):
@@ -647,15 +648,20 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(list(self.root.glob("serial*.tmp.mkv")), [],
                          "a serial interrupt must remove its own temp file")
         self.assertTrue(src.exists(), "original must survive an interrupt")
-        self.assertFalse((self.root / "serial.mkv").exists())
+        self.assertFalse((self.root / "serial.av1.mkv").exists())
 
     def test_q_same_stem_sources_do_not_collide_in_parallel(self):
         """同 stem 不同容器的两个源以前共用一个 a.tmp.mkv：一个报文件不存在，
         另一个可能把对方的产物当成自己的校验通过——静默的数据损坏。"""
         box = Path(tempfile.mkdtemp(prefix="vc_collide_", dir=self.root))
         cfg = box / "config.toml"
-        cfg.write_text(INTEGRATION_CONFIG.replace("{root}", box.as_posix()),
-                       encoding="utf-8")
+        cfg.write_text(
+            INTEGRATION_CONFIG.replace("{root}", box.as_posix())
+            # 两个 fixture 都低码率，默认会过 [skip] 码率闸；压到 0.001 才
+            # 是真正的「两源同时产出 a.av1.mkv」且都走编码
+            .replace("h264 = 0.05", "h264 = 0.001"),
+            encoding="utf-8",
+        )
         ff = Tools({"ffmpeg": "", "ffprobe": ""}).ffmpeg
         # 两个源内容不同，才能看出产物有没有串味
         for name, pattern in (("a.mp4", "testsrc2"), ("a.mkv", "smptebars")):
@@ -679,12 +685,13 @@ class IntegrationTests(unittest.TestCase):
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertEqual(list(box.glob("*.tmp.mkv")), [], r.stdout)
         outputs = sorted(p.name for p in box.glob("a*.mkv"))
-        self.assertEqual(outputs, ["a.av1.mkv", "a.mkv"], r.stdout)
+        self.assertEqual(outputs, ["a.av1-2.mkv", "a.av1.mkv"], r.stdout)
         # 两个产物来自不同的源，体积不该恰好一致
-        self.assertNotEqual((box / "a.mkv").stat().st_size,
-                            (box / "a.av1.mkv").stat().st_size,
+        self.assertNotEqual((box / "a.av1.mkv").stat().st_size,
+                            (box / "a.av1-2.mkv").stat().st_size,
                             "both outputs look identical: temp files collided")
         self.assertFalse((box / "a.mp4").exists(), r.stdout)
+        self.assertFalse((box / "a.mkv").exists(), r.stdout)
 
 
     def test_r_unsupported_pixel_format_is_normalised(self):
@@ -710,7 +717,7 @@ class IntegrationTests(unittest.TestCase):
             cwd=str(helpers.ROOT), capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=600,
         )
-        out = box / "chroma422.mkv"
+        out = box / "chroma422.av1.mkv"
         self.assertEqual(r.returncode, 0, r.stdout)
         self.assertTrue(out.exists(), r.stdout)
         # 4:2:2 归一化到 4:2:0，同时 8-bit 提到 10-bit 编码
@@ -739,7 +746,7 @@ class IntegrationTests(unittest.TestCase):
             encoding="utf-8", errors="replace", timeout=600,
         )
         self.assertEqual(r.returncode, 0, r.stdout)
-        comment = self.comment(box / "noted.mkv")
+        comment = self.comment(box / "noted.av1.mkv")
         self.assertIn("ripped by hand", comment,
                       "the user's own comment must not be destroyed")
         self.assertIn("vcompress-v1", comment)
