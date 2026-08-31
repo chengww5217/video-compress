@@ -4,12 +4,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import tempfile
 import unittest
+from collections import Counter
 from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
 from vcompress import verify, vmaf
-from vcompress.verify import check_basic, check_color
+from vcompress.verify import check_basic, check_color, count_decode_errors
 
 
 class CheckColorTests(unittest.TestCase):
@@ -138,6 +139,138 @@ class CheckBasicTests(unittest.TestCase):
         self.assertTrue(ok, msg)
 
 
+class DecodeErrorCountTests(unittest.TestCase):
+    """错误行归一化：地址和"重复 N 次"折叠必须先摊平，否则源和产物对不上。"""
+
+    def test_object_addresses_are_stripped(self):
+        a = count_decode_errors(["[mp3float @ 0x5f344f064d80] Header missing"])
+        b = count_decode_errors(["[mp3float @ 0x62296f83db00] Header missing"])
+        self.assertEqual(a, b)
+
+    def test_stream_indexes_are_stripped(self):
+        """同一条音轨在 AVI 里是 0:1，在产物里可能是 0:0。"""
+        a = count_decode_errors(["[aist#0:1/mp3 @ 0x1] [dec:mp3float @ 0x2] "
+                                 "Error submitting packet to decoder"])
+        b = count_decode_errors(["[aist#0:0/mp3 @ 0x3] [dec:mp3float @ 0x4] "
+                                 "Error submitting packet to decoder"])
+        self.assertEqual(a, b)
+
+    def test_different_decoders_stay_different(self):
+        """抹序号不能抹掉「哪个解码器报的」，视频和音频的错不能混为一谈。"""
+        a = count_decode_errors(["[vist#0:0/mpeg4 @ 0x1] Error submitting"])
+        b = count_decode_errors(["[aist#0:0/mp3 @ 0x1] Error submitting"])
+        self.assertNotEqual(a, b)
+
+    def test_repeat_line_expands_the_previous_message(self):
+        counts = count_decode_errors([
+            "[mp3float @ 0x1] Header missing",
+            "    Last message repeated 3 times",
+        ])
+        self.assertEqual(list(counts.values()), [4])
+
+    def test_repeat_singular_form(self):
+        counts = count_decode_errors([
+            "[mp3float @ 0x1] Header missing",
+            "    Last message repeated 1 times",
+            "[mp3float @ 0x2] Header missing",
+        ])
+        self.assertEqual(list(counts.values()), [3])
+
+    def test_blank_lines_and_none_are_ignored(self):
+        self.assertEqual(count_decode_errors(None), Counter())
+        self.assertEqual(count_decode_errors(["", "  "]), Counter())
+
+
+class AddedDecodeErrorTests(unittest.TestCase):
+    """解码校验的源文件基线：片源自带的坏帧不算产物的错。
+
+    真实案例：一个 mpeg4+mp3 的 AVI 片源，mp3 轨有 4 个坏帧，音轨 copy 后
+    原样进了产物，结果三个多小时的正常编码被判「解码校验没过」，而且每次
+    重跑都在同一处翻车。
+    """
+
+    def setUp(self):
+        self.calls = []
+        self.errs = {}
+        self.orig_decode = verify.decode_errors
+        verify.decode_errors = self.fake_decode
+
+    def tearDown(self):
+        verify.decode_errors = self.orig_decode
+
+    def fake_decode(self, ffmpeg, path):
+        self.calls.append(Path(path).name)
+        return self.errs.get(Path(path).name)
+
+    def added(self):
+        return verify.added_decode_errors("ffmpeg", Path("a.tmp.mkv"),
+                                          Path("a.avi"))
+
+    def test_clean_output_never_touches_the_source(self):
+        self.assertEqual(self.added(), [])
+        self.assertEqual(self.calls, ["a.tmp.mkv"],
+                         "产物解码干净时不该再解一遍源文件")
+
+    def test_errors_inherited_from_the_source_pass(self):
+        """取自真实片源的错误文本：音轨序号从 0:1 变成 0:0 也算同一条。"""
+        self.errs["a.tmp.mkv"] = [
+            "[mp3float @ 0xaaa] Header missing",
+            "    Last message repeated 1 times",
+            "[mp3float @ 0xbbb] Header missing",
+            "[aist#0:0/mp3 @ 0xccc] [dec:mp3float @ 0xddd] Error submitting "
+            "packet to decoder: Invalid data found when processing input",
+        ]
+        self.errs["a.avi"] = [
+            "[mp3float @ 0x111] Header missing",
+            "    Last message repeated 1 times",
+            "[mp3float @ 0x222] Header missing",
+            "[aist#0:1/mp3 @ 0x333] [dec:mp3float @ 0x444] Error submitting "
+            "packet to decoder: Invalid data found when processing input",
+            "[mpeg4 @ 0x555] low_delay flag set incorrectly, clearing it",
+        ]
+        self.assertEqual(self.added(), [])
+        self.assertEqual(self.calls, ["a.tmp.mkv", "a.avi"])
+
+    def test_new_error_in_the_output_still_fails(self):
+        self.errs["a.tmp.mkv"] = [
+            "[mp3float @ 0xaaa] Header missing",
+            "[matroska @ 0xbbb] Invalid data found when processing input",
+        ]
+        self.errs["a.avi"] = ["[mp3float @ 0xccc] Header missing"]
+        added = self.added()
+        self.assertEqual(len(added), 1)
+        self.assertIn("Invalid data found", added[0])
+
+    def test_more_occurrences_than_the_source_fails(self):
+        """同一条消息在产物里多出来，也是产物的问题。"""
+        self.errs["a.tmp.mkv"] = [
+            "[mp3float @ 0xaaa] Header missing",
+            "    Last message repeated 9 times",
+        ]
+        self.errs["a.avi"] = ["[mp3float @ 0xccc] Header missing"]
+        added = self.added()
+        self.assertEqual(len(added), 1)
+        self.assertIn("产物 10 次，源文件只有 1 次", added[0])
+
+    def test_repeated_new_error_reports_its_count(self):
+        self.errs["a.tmp.mkv"] = [
+            "[av1 @ 0xaaa] Bad frame",
+            "    Last message repeated 4 times",
+        ]
+        added = self.added()
+        self.assertEqual(len(added), 1)
+        self.assertIn("（5 次）", added[0])
+
+    def test_source_noise_absent_from_the_output_is_not_a_failure(self):
+        """比对是单向的：源里多出来的行不该反过来算问题。"""
+        self.errs["a.tmp.mkv"] = ["[mp3float @ 0xaaa] Header missing"]
+        self.errs["a.avi"] = [
+            "[mp3float @ 0xccc] Header missing",
+            "[null @ 0xddd] non monotonically increasing dts",
+        ]
+        self.assertEqual(self.added(), [])
+
+
 class RunAllTests(unittest.TestCase):
     """校验链的编排：便宜的检查先跑，环境缺能力只告警，画质不过才算失败。"""
 
@@ -150,6 +283,7 @@ class RunAllTests(unittest.TestCase):
         self.out.write_bytes(b"x" * 40_000)
         self.calls = []
         self.decode = None
+        self.src_decode = None
         self.spot = (96.0, 95.0, "")
         self.orig_decode = verify.decode_errors
         self.orig_spot = verify.vmaf_spot_check
@@ -162,8 +296,10 @@ class RunAllTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def fake_decode(self, ffmpeg, path):
-        self.calls.append("decode")
-        return self.decode
+        """产物和源文件的解码分别记账：基线是惰性的，得看出它有没有被跑到。"""
+        out = Path(path) == self.out
+        self.calls.append("decode" if out else "baseline")
+        return self.decode if out else self.src_decode
 
     def fake_spot(self, *a, **kw):
         self.calls.append("vmaf")
@@ -184,7 +320,15 @@ class RunAllTests(unittest.TestCase):
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
         self.assertIn("解码校验没过", str(cm.exception))
-        self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
+        self.assertEqual(self.calls, ["decode", "baseline"],
+                         "vmaf must not have run")
+
+    def test_source_inherited_decode_errors_do_not_fail_the_run(self):
+        self.decode = ["[mp3float @ 0xaaa] Header missing"]
+        self.src_decode = ["[mp3float @ 0xbbb] Header missing"]
+        mean, worst = self.run_all()
+        self.assertAlmostEqual(mean, 96.0)
+        self.assertEqual(self.calls, ["decode", "baseline", "vmaf"])
 
     def test_decode_check_can_be_disabled(self):
         self.cfg["verify"]["decode_check"] = False

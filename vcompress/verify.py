@@ -2,13 +2,27 @@
 
 对外只需要 run_all()：四步校验的顺序、哪一步失败算硬失败、哪一步不可用只
 告警，都是校验策略的一部分，不该散落在调用方里。
+
+解码校验以源文件为基线：片源自带的解码错误不算产物的问题，详见
+added_decode_errors()。
 """
 
+import re
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 from . import proc, vmaf
+from .logfmt import em
 from .util import to_float, to_int
+
+# 收集上限：一个真损坏的文件能刷出成千上万行，留够比对用的量就行
+MAX_DECODE_ERRORS = 500
+
+# 每次运行都不同、或者两个文件之间本就会变的部分，比对前必须抹掉
+_ADDR_RE = re.compile(r"@ 0x[0-9a-fA-F]+")
+_STREAM_RE = re.compile(r"#\d+:\d+")
+_REPEAT_RE = re.compile(r"Last message repeated (\d+) times?")
 
 
 class VerifyError(RuntimeError):
@@ -21,10 +35,78 @@ def decode_errors(ffmpeg: str, path: Path):
     )
     errs = [ln for ln in err.splitlines() if ln.strip()]
     if errs:
-        return errs[:10]
+        return errs[:MAX_DECODE_ERRORS]
     if rc != 0:
         return [f"解码进程退出码 {rc}，但没打印任何诊断信息"]
     return None
+
+
+def count_decode_errors(lines) -> Counter:
+    """把解码错误行归一化成 {消息: 次数}，让两次解码的同一条消息能对上。
+
+    要抹掉三样东西：
+
+    - 对象地址（`[mp3float @ 0x5f34...]`）每次运行都不一样；
+    - 流序号（`[aist#0:1/mp3]`）——同一条音轨在源和产物里的序号未必相同，
+      AVI 里是 0:1、产物里可能是 0:0，不抹掉就会把继承来的错误当成新错误。
+      消息里仍带着编码器名（`/mp3`、`dec:mp3float`），不会把视频的错误和
+      音频的错误混为一谈；
+    - "Last message repeated N times"：ffmpeg 把连续重复的消息折叠成这一行，
+      不展开的话同一个缺陷在源和产物里的次数对不上。
+    """
+    counts = Counter()
+    previous = ""
+    for raw in lines or ():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _REPEAT_RE.search(line)
+        if m and previous:
+            counts[previous] += int(m.group(1))
+            continue
+        canon = _STREAM_RE.sub("#?:?", _ADDR_RE.sub("@ 0x?", line))
+        counts[canon] += 1
+        previous = canon
+    return counts
+
+
+def added_decode_errors(ffmpeg: str, out: Path, src: Path, log=None):
+    """产物比源文件多出来的解码错误；产物没引入新问题时返回空列表。
+
+    只解产物是不够的。片源自带的坏帧——AVI 里帧边界没对齐的 mp3、损坏的包——
+    在音轨 copy 时会原样进到产物里，把它们算成「编码把文件弄坏了」，会让一个
+    几小时的正常编码结果被丢掉，而且每次重跑都在同一处翻车。所以产物报错时
+    再解一遍源文件当基线，只有源里没有的错误才算产物的问题。
+
+    比对是单向的：源文件全流解码会多出一些产物不可能有的噪音（容器层的 dts
+    告警、旧编码器的 flag 修正），那些不该影响判断。
+
+    基线是惰性的：产物解码干净就根本不碰源文件，正常流程零开销。
+    """
+    out_errs = decode_errors(ffmpeg, out)
+    if not out_errs:
+        return []
+    out_counts = count_decode_errors(out_errs)
+    if log:
+        log.info(f"[校验] {em(src.name)}：产物解码有 {len(out_errs)} 处报错，"
+                 f"解一遍源文件做基线比对")
+    src_counts = count_decode_errors(decode_errors(ffmpeg, src))
+    added = []
+    for msg, n in out_counts.items():
+        before = src_counts.get(msg, 0)
+        if n <= before:
+            continue
+        if before:
+            added.append(f"{msg}（产物 {n} 次，源文件只有 {before} 次）")
+        elif n > 1:
+            added.append(f"{msg}（{n} 次）")
+        else:
+            added.append(msg)
+    if not added and log:
+        sample = "；".join(list(out_counts)[:2])
+        log.warning(f"{em(src.name)}：产物解码报的错源文件本来就有"
+                    f"（{sample}），不是编码引入的，按通过处理")
+    return added
 
 
 def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
@@ -210,7 +292,7 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     时长、体积、色彩元数据），最后才做最贵的 VMAF 抽检。
     """
     if cfg["verify"].get("decode_check", True):
-        errs = decode_errors(tools.ffmpeg, out)
+        errs = added_decode_errors(tools.ffmpeg, out, src, log=log)
         if errs:
             raise VerifyError("解码校验没过：" + "；".join(errs[:3]))
 
