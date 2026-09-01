@@ -11,7 +11,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg
-from vcompress import adaptive, encode, vmaf
+from vcompress import adaptive, encode, proc, vmaf
 
 
 class SearchMidpointTests(unittest.TestCase):
@@ -175,6 +175,91 @@ class PickCrfMarginTests(unittest.TestCase):
     def test_borderline_result_steps_down_a_notch(self):
         picked = self.pick(0.05)
         self.assertEqual(picked.crf, 31)
+
+
+class CancelDuringSearchTests(unittest.TestCase):
+    """Ctrl+C 打断样本编码，不能被当成「搜索失败」回退到固定 CRF。
+
+    真实日志里的后果：汇总都打完了，两个 worker 又各自起了一个几小时的编码，
+    还写出了临时文件。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.orig_encode = adaptive._encode_sample
+        self.orig_extract = vmaf.extract_segment
+        adaptive._encode_sample = self.cancel_then_fail
+        vmaf.extract_segment = self.fake_extract
+        self.log = logging.getLogger("cancel-search-test")
+        self.log.addHandler(logging.NullHandler())
+
+    def tearDown(self):
+        adaptive._encode_sample = self.orig_encode
+        vmaf.extract_segment = self.orig_extract
+        proc.clear_cancel()
+        self.tmp.cleanup()
+
+    def fake_extract(self, ff, src, start, seconds, out, codec="libx264"):
+        Path(out).write_bytes(b"ref")
+
+    def cancel_then_fail(self, ff, ref, crf, cfg, out):
+        # 用户按了 Ctrl+C：主线程 terminate_all 杀掉样本编码，子进程返回非 0
+        proc.terminate_all()
+        raise encode.EncodeError("sample encode failed at crf=33: killed")
+
+    def test_cancel_propagates_instead_of_falling_back(self):
+        cfg = make_cfg()
+        with self.assertRaises(proc.Cancelled):
+            adaptive.pick_crf(helpers.FakeTools(), self.root / "a.mp4", 600.0,
+                              cfg["encode"]["av1"], cfg["adaptive"], self.log)
+
+    def test_plain_failure_still_falls_back(self):
+        """没有取消的普通失败仍然回退固定 CRF——那个行为是对的。"""
+        adaptive._encode_sample = self.orig_encode
+
+        def just_fail(ff, ref, crf, cfg, out):
+            raise encode.EncodeError("something else broke")
+
+        adaptive._encode_sample = just_fail
+        cfg = make_cfg()
+        self.assertIsNone(
+            adaptive.pick_crf(helpers.FakeTools(), self.root / "a.mp4", 600.0,
+                              cfg["encode"]["av1"], cfg["adaptive"], self.log))
+
+
+class SampleCommandTests(unittest.TestCase):
+    """样本编码必须关掉进度输出，否则失败原因会被进度行挤出错误信息。"""
+
+    def setUp(self):
+        self.cmds = []
+        self.rc = 0
+        self.orig_run = adaptive.proc.run_managed
+        adaptive.proc.run_managed = self.fake_run
+
+    def tearDown(self):
+        adaptive.proc.run_managed = self.orig_run
+
+    def fake_run(self, cmd, cwd=None):
+        self.cmds.append(cmd)
+        return self.rc, "", ("frame=  144 fps= 22 speed=0.734x\n"
+                             "No space left on device\n"
+                             "[libx264 @ 0x1] kb/s:497611.09\n"
+                             "Conversion failed!")
+
+    def test_nostats_is_passed(self):
+        adaptive._encode_sample("ffmpeg", Path("ref.mkv"), 30,
+                                make_cfg()["encode"]["av1"], Path("out.mkv"))
+        self.assertIn("-nostats", self.cmds[0])
+
+    def test_failure_message_keeps_the_real_cause(self):
+        self.rc = 1
+        with self.assertRaises(encode.EncodeError) as cm:
+            adaptive._encode_sample("ffmpeg", Path("ref.mkv"), 30,
+                                    make_cfg()["encode"]["av1"],
+                                    Path("out.mkv"))
+        self.assertIn("No space left on device", str(cm.exception))
+        self.assertNotIn("frame=", str(cm.exception))
 
 
 if __name__ == "__main__":

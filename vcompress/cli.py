@@ -8,7 +8,8 @@ import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 
-from . import config, encode, files, logfmt, pipeline, power, probe, proc, results
+from . import (config, encode, files, logfmt, pipeline, power, probe, proc,
+               results, scratch)
 from .caps import Caps
 from .logfmt import em
 from .pipeline import RunContext, RunStats
@@ -191,6 +192,10 @@ def _run_parallel(ctx: RunContext, todo, workers: int) -> None:
     except BaseException:
         proc.terminate_all()
         ex.shutdown(wait=False, cancel_futures=True)
+        # 到这里子进程都已经被杀掉、新的也起不来了（proc.spawn 会拒绝），
+        # worker 只剩清理工作，可以放心等它们收尾。不等的话主线程会先打出
+        # 汇总，worker 的日志接在汇总后面，数字也对不上。
+        ex.shutdown(wait=True)
         raise
     ex.shutdown(wait=True)
 
@@ -260,6 +265,16 @@ def main(argv=None) -> int:
         log.info(f"{cfg_path} 不存在，使用内置默认配置"
                  f"（日志与记录写到 {cfg_dir} 下）")
     proc.clear_cancel()
+
+    # 无损样本片段动辄几个 G，不能放在多数发行版都是内存盘的系统临时目录里
+    tmp_root = scratch.set_dir(
+        config.resolve_run_path(cfg_dir, run_cfg["temp_dir"])
+        if run_cfg["temp_dir"] else None)
+    if run_cfg["temp_dir"] and tmp_root is None:
+        log.warning(f"临时工作目录 {run_cfg['temp_dir']} 建不出来，"
+                    f"改用系统临时目录")
+    else:
+        log.debug(f"临时工作目录：{tmp_root or '系统默认'}")
 
     encoder = args.encoder or cfg["encode"]["encoder"]
     names = config.encoder_names(cfg)

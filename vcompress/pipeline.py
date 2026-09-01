@@ -82,6 +82,16 @@ class RunContext:
         return self.caps.lossless_codec
 
     @property
+    def vmaf_available(self) -> bool:
+        """这个 ffmpeg 构建能不能量 VMAF。
+
+        校验链要用它区分「谁都量不了」（降级告警）和「这个文件量不出来」
+        （硬失败）。构建能力问不出来时（caps 为空）按能用算，让实际的
+        失败信息说话。
+        """
+        return not self.caps.filters or "libvmaf" in self.caps.filters
+
+    @property
     def adaptive_enabled(self) -> bool:
         return self.adaptive and bool(self.cfg["adaptive"].get("enabled", True))
 
@@ -133,12 +143,14 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
         out_info = probe.probe(ctx.tools, tmp)
         mean, worst = verify.run_all(ctx.tools, src, tmp, info, out_info,
                                      ctx.cfg, log=log,
-                                     lossless_codec=ctx.lossless_codec)
+                                     lossless_codec=ctx.lossless_codec,
+                                     vmaf_available=ctx.vmaf_available)
         if mean is not None:
             log.info(f"[校验] {em(src.name)}：VMAF {em(f'{mean:.2f}')}")
-        _warn_below_target(ctx, src, picked, mean, worst)
+        below = _warn_below_target(ctx, src, picked, mean, worst)
 
-        saved = _commit(ctx, src, tmp, target, info, crf, elapsed)
+        saved = _commit(ctx, src, tmp, target, info, crf, elapsed,
+                        mean, worst, below)
         return ctx.stats.record(OK, saved)
     except SkipFile as skipped:
         # 搜索阶段就看出不值得压：删掉可能留下的半成品，按跳过记账
@@ -190,15 +202,19 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     return crf, elapsed, picked
 
 
-def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst) -> None:
+def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst):
     """自适应产物按 target_vmaf 复核全片抽检，低于目标必须留痕。
 
     [verify] 的阈值是给固定 CRF 兜底的灾难性失败线；自适应承诺的是
-    target_vmaf。两边抽样位置不同，搜索达标不代表全片达标。产物仍按通过
-    处理（它过了 [verify] 的闸门），但画质的欠账不能无声无息。
+    target_vmaf。搜索是在几十秒样本上做的，全片抽检看的是另一批更长的片段，
+    搜索达标不代表全片达标。产物仍按通过处理（它过了 [verify] 的闸门），但
+    画质的欠账不能无声无息。
+
+    返回留痕用的文字（没欠账时返回空串），由调用方写进 results.jsonl——只打
+    日志的话，想知道"哪些文件没达到目标"就只能去 grep 几万行日志。
     """
     if picked is None or mean is None:
-        return
+        return ""
     target = to_float(ctx.cfg["adaptive"].get("target_vmaf"), 95.0)
     low = []
     if mean < target:
@@ -206,13 +222,15 @@ def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst) -> None:
     if worst is not None and worst < target:
         low.append(f"最低段 {worst:.2f}")
     if not low:
-        return
+        return ""
+    detail = "、".join(low)
     log.warning(
         f"[校验] {em(src.name)}：全片抽检 VMAF 没达到自适应目标 "
-        f"{em(str(target))}（{'、'.join(low)}；搜索时样本最差 "
+        f"{em(str(target))}（{detail}；搜索时样本最差 "
         f"{picked.worst_vmaf:.2f}）。产物仍按通过保留，"
         f"介意的话删掉产物加 --force 重压"
     )
+    return f"{detail}（目标 {target}，搜索时样本最差 {picked.worst_vmaf:.2f}）"
 
 
 def _reject_unworthy(ctx: RunContext, info, picked) -> None:
@@ -246,7 +264,8 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
 
 
 def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
-            crf: float, elapsed: float) -> int:
+            crf: float, elapsed: float, vmaf_mean=None, vmaf_worst=None,
+            below_target: str = "") -> int:
     """把临时产物换成正式文件并按配置处理原文件，返回省下的字节数。
 
     输出名在编码前已经定过一次，这里再定一次：几小时里目标名可能被别的东西
@@ -273,7 +292,13 @@ def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
     )
     ctx.store.add("ok", info, output=str(final), crf=crf, new_size=new_size,
                   saving=round(saving, 4), seconds=round(elapsed, 1),
-                  kept=ctx.keep)
+                  kept=ctx.keep,
+                  # 画质记进去才查得到：光打日志的话，「哪些文件没达到目标」
+                  # 只能靠 grep 几万行日志
+                  vmaf=round(vmaf_mean, 2) if vmaf_mean is not None else None,
+                  vmaf_worst=(round(vmaf_worst, 2)
+                              if vmaf_worst is not None else None),
+                  below_target=below_target or None)
     return saved
 
 

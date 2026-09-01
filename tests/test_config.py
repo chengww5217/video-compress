@@ -64,6 +64,28 @@ class ShippedConfigTests(unittest.TestCase):
         self.assertIn("90%", reason)
 
 
+class SamplingConsistencyTests(unittest.TestCase):
+    """搜索和抽检必须是同一把尺子，默认值不能各走各的。"""
+
+    def test_search_and_spot_check_use_the_same_segment_count(self):
+        """段数一致，两边的取样窗口才以同一批位置为中心、互相嵌套。"""
+        self.assertEqual(config.DEFAULTS["adaptive"]["sample_count"],
+                         config.DEFAULTS["verify"]["vmaf_segments"])
+
+    def test_search_segments_are_shorter_than_the_spot_check(self):
+        self.assertLess(config.DEFAULTS["adaptive"]["sample_seconds"],
+                        config.DEFAULTS["verify"]["vmaf_sample_seconds"])
+
+    def test_margin_is_big_enough_to_matter(self):
+        """二分必然收敛到录取线上，余量要吸收样本外推到全片的误差。"""
+        self.assertGreaterEqual(config.DEFAULTS["adaptive"]["target_margin"],
+                                0.5)
+
+    def test_temp_dir_defaults_into_the_project(self):
+        """系统临时目录多半是内存盘，几个 G 的无损样本放不下。"""
+        self.assertTrue(config.DEFAULTS["run"]["temp_dir"])
+
+
 class MergeTests(unittest.TestCase):
     def test_missing_sections_are_filled_in(self):
         cfg = config.normalise({"encode": {"encoder": "x265"}})

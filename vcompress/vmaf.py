@@ -6,10 +6,9 @@
 """
 
 import json
-import tempfile
 from pathlib import Path
 
-from . import proc
+from . import proc, scratch
 from .util import to_int
 
 
@@ -87,7 +86,8 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
     """
     lead = min(SEEK_LEADIN_S, max(0.0, start))
     return [
-        ffmpeg, "-hide_banner", "-y",
+        ffmpeg, "-hide_banner", "-nostats",
+        "-y",
         "-ss", f"{max(0.0, start - lead):.3f}",
         "-i", str(src),
         "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
@@ -102,7 +102,7 @@ def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
     rc, _out, err = proc.run_managed(
         segment_cmd(ffmpeg, src, start, seconds, out, codec))
     if rc != 0:
-        raise VmafError(f"抽取样本片段失败：{err.strip()[-300:]}")
+        raise VmafError(f"抽取样本片段失败：{proc.error_tail(err)}")
 
 
 # ------------------------------------------------------------------ 模型与打分
@@ -193,10 +193,10 @@ def measure(ffmpeg: str, distorted: Path, reference: Path, shift: int = 0,
 
 def _measure(ffmpeg: str, distorted: Path, reference: Path, shift: int,
              model: str, pool: str):
-    with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
+    with scratch.temp_dir(prefix="vcvmaf_") as td:
         log_path = Path(td) / "vmaf.json"
         cmd = [
-            ffmpeg, "-hide_banner",
+            ffmpeg, "-hide_banner", "-nostats",
             "-i", str(distorted),
             "-i", str(reference),
             "-lavfi", lavfi(shift, model),
@@ -204,7 +204,7 @@ def _measure(ffmpeg: str, distorted: Path, reference: Path, shift: int,
         ]
         rc, _out, err = proc.run_managed(cmd, cwd=td)
         if rc != 0:
-            raise VmafError(f"libvmaf 执行失败：{err.strip()[-300:]}")
+            raise VmafError(f"libvmaf 执行失败：{proc.error_tail(err)}")
         try:
             data = json.loads(log_path.read_text(encoding="utf-8"))
         except (OSError, ValueError) as e:

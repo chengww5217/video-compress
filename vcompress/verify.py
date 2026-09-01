@@ -8,11 +8,10 @@ added_decode_errors()。
 """
 
 import re
-import tempfile
 from collections import Counter
 from pathlib import Path
 
-from . import proc, vmaf
+from . import proc, scratch, vmaf
 from .logfmt import em
 from .util import to_float, to_int
 
@@ -245,7 +244,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
     records = []
     # 两个文件用同一批切点，且切在帧间隙里，抽出的段才逐帧对应
     starts = vmaf.sample_starts(duration, seconds, segments, fps=fps)
-    with tempfile.TemporaryDirectory(prefix="vcvmaf_") as td:
+    with scratch.temp_dir(prefix="vcvmaf_") as td:
         root = Path(td)
         for i, start in enumerate(starts):
             ref = root / f"ref{i}.mkv"
@@ -285,11 +284,14 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
 
 
 def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
-            log=None, lossless_codec: str = "libx264"):
+            log=None, lossless_codec: str = "libx264",
+            vmaf_available: bool = True):
     """跑完整校验链，任何硬失败抛 VerifyError；返回 (VMAF 均值, 最低段)。
 
-    两个值都可能为 None（量不了 VMAF 时）。顺序是刻意的：先做便宜的（解码、
-    时长、体积、色彩元数据），最后才做最贵的 VMAF 抽检。
+    两个值都可能为 None（这个构建量不了 VMAF 时）。顺序是刻意的：先做便宜的
+    （解码、时长、体积、色彩元数据），最后才做最贵的 VMAF 抽检。
+
+    `vmaf_available` 是构建能力（caps 里有没有 libvmaf 滤镜），由调用方给。
     """
     if cfg["verify"].get("decode_check", True):
         errs = added_decode_errors(tools.ffmpeg, out, src, log=log)
@@ -310,9 +312,21 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
                                        lossless_codec=lossless_codec,
                                        model=vmaf_model(orig_info, cfg))
     if msg and mean is None:
-        # 构建里没有 libvmaf 之类的环境问题：告警但不否决，其余检查已经过了
+        # 「量不出来」分两种，后果差了一个量级：
+        #
+        # 构建里根本没有 libvmaf——每个文件都一样，谁也拿不到分数，硬失败就等于
+        # 这个工具在这台机器上不能用。这种降级为告警。
+        #
+        # 有 libvmaf 却在这个文件上失败——抽样写不下去（临时目录满了）、片段解不
+        # 开、libvmaf 中途崩掉。这种必须硬失败：画质是这个工具唯一的承诺，量不出
+        # 来就不能说"通过"，尤其是 --delete-original 会跟着把原文件删掉。实际
+        # 踩过一次：一个 4K 片源抽到第 3/5 段时抽样失败，其余检查放行，原文件
+        # 就这么没了，而全片画质从来没被量过。
+        if vmaf_available:
+            raise VerifyError(f"量不出 VMAF，不能确认画质（{msg}）")
         if log:
-            log.warning(f"{src.name}：这次量不了 VMAF（{msg}），其余检查已通过，继续")
+            log.warning(f"{em(src.name)}：这个 ffmpeg 构建没有 libvmaf，"
+                        f"量不了画质（{msg}），其余检查已通过，继续")
     elif msg:
         raise VerifyError(msg)
     return mean, worst

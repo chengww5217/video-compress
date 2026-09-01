@@ -64,11 +64,11 @@ extra = "-x265-params aq-mode=3:psy-rd=2.0"
 [adaptive]
 enabled = true
 target_vmaf = 95.0     # 视觉无损基准，取多段里的最差段；想更激进可降到 92~93
-target_margin = 0.05   # 搜索余量：样本最差段要过 目标+余量 才录取，贴线 CRF 自动降档；0 关闭
+target_margin = 0.5    # 搜索余量：样本最差段要过 目标+余量 才录取；0 关闭
 crf_min = 16
 crf_max = 50
-sample_seconds = 10    # 每段样本多长
-sample_count = 4       # 从整片均匀抽几段（取最差段决策）
+sample_seconds = 8     # 每段样本多长（比抽检的 20s 短，窗口嵌在抽检窗口正中间）
+sample_count = 5       # 从整片均匀抽几段（取最差段决策）；要和 vmaf_segments 一致
 search_step = 0.25     # 搜索粒度；1 级 CRF ≈ 8% 体积，只搜整数平均白扔 4%
 require_target = true  # 连 crf_min 都达不到 target 的片源直接跳过
 
@@ -95,6 +95,10 @@ keep_failed_output = false # 校验没过时把产物留成 .failed.mkv 而不�
 workers = 1                # 并发处理的文件数（单文件编码本身已是多线程）
 results_file = "logs/results.jsonl"
 log_file = "logs/vcompress.log"
+# 无损样本片段放哪里。留空 = 系统临时目录，但那多半是内存盘（tmpfs）：4K 片源
+# 的无损抽样约 500 Mbps，一段 20 秒就 1.2 GB，抽检要两份、搜索还要同时留几段，
+# 撑爆之后抽样会失败。要放到别的盘就写绝对路径。
+temp_dir = "logs/tmp"
 log_max_bytes = 5242880
 log_backups = 3
 use_recycle_bin = false

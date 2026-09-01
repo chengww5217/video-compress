@@ -28,7 +28,8 @@ python -m unittest tests.test_integration -v
 | `files.py` | 文件发现、命名规则、输出名预留、删除策略 |
 | `results.py` | results.jsonl 读写与缓存新鲜度判断 |
 | `progress.py` | 单行进度渲染 |
-| `proc.py` | 子进程注册表与取消（Ctrl+C 时统一杀干净） |
+| `proc.py` | 子进程注册表、取消守卫（取消后拒绝再起进程）、从 ffmpeg stderr 里提取失败原因 |
+| `scratch.py` | 临时工作目录：无损样本片段放哪里（默认不放系统临时目录，那多半是内存盘） |
 | `power.py` | 完成后自动关机（结束时重读配置、写回 false、下发关机命令） |
 | `logfmt.py` | 日志呈现：控制台上色与重点高亮、文件日志的会话分隔 |
 | `util.py` | 类型宽松转换与格式化 |

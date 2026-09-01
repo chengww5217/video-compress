@@ -10,7 +10,7 @@ from unittest import mock
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import caps, cli, power, proc
+from vcompress import caps, cli, power, proc, scratch
 from vcompress.logfmt import em
 from vcompress.results import ResultStore
 
@@ -263,6 +263,19 @@ class MainEarlyExitTests(unittest.TestCase):
         p = self.write_cfg("")
         rc = cli.main([str(self.root), "--config", str(p)])
         self.assertEqual(rc, cli.EXIT_OK)
+
+    def test_temp_dir_from_the_config_is_created_and_used(self):
+        """系统临时目录多半是内存盘，几个 G 的无损样本必须挪走。"""
+        p = self.write_cfg('temp_dir = "scratch/here"\n')
+        cli.main([str(self.root), "--config", str(p)])
+        target = self.root / "scratch" / "here"
+        self.assertTrue(target.is_dir())
+        self.assertEqual(scratch.get_dir(), target)
+
+    def test_empty_temp_dir_means_system_default(self):
+        p = self.write_cfg('temp_dir = ""\n')
+        cli.main([str(self.root), "--config", str(p)])
+        self.assertIsNone(scratch.get_dir())
 
     def test_all_paths_invalid_is_a_usage_error(self):
         """传入的路径全部失效多半是用法错误（比如把输出路径当了参数）。"""

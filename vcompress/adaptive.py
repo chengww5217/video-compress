@@ -5,11 +5,10 @@
 方在动手编码之前就能算出「这文件值不值得压几个小时」。
 """
 
-import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import encode, proc, vmaf
+from . import encode, proc, scratch, vmaf
 from .logfmt import em
 from .util import to_float, to_int
 
@@ -18,7 +17,7 @@ def _encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
                    out: Path):
     """把一段参考片段按给定 CRF 编一遍，用来量分数和称体积。"""
     cmd = [
-        ffmpeg, "-hide_banner", "-y",
+        ffmpeg, "-hide_banner", "-nostats", "-y",
         "-i", str(ref),
         *encode.video_args(encoder_cfg, crf),
         "-an",
@@ -28,7 +27,7 @@ def _encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
     if rc != 0:
         raise encode.EncodeError(
             f"sample encode failed at crf={encode.fmt_crf(crf)}: "
-            f"{err.strip()[-300:]}")
+            f"{proc.error_tail(err)}")
 
 
 @dataclass(frozen=True)
@@ -113,7 +112,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
     best = None
     log.info(f"[搜索] {em(src.name)}：抽 {len(starts)} 段 × {seconds:.0f}s "
              f"作为参考样本")
-    tmpdir = tempfile.TemporaryDirectory(prefix="vcadapt_")
+    tmpdir = scratch.temp_dir(prefix="vcadapt_")
     try:
         root = Path(tmpdir.name)
         refs = []
@@ -128,8 +127,8 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
             mid = search_midpoint(lo, hi, step)
             score, sample_bytes, measured = _probe_crf(
                 tools, refs, mid, enc_cfg, root, accept, model, log)
-            log.info(f"[搜索] crf={em(encode.fmt_crf(mid))}：最差段 VMAF "
-                     f"{em(f'{score:.2f}')}（目标 {goal}）")
+            log.info(f"[搜索] {em(src.name)} crf={em(encode.fmt_crf(mid))}："
+                     f"最差段 VMAF {em(f'{score:.2f}')}（目标 {goal}）")
             if score >= accept:
                 best = CrfChoice(mid, _sample_bitrate(sample_bytes, span,
                                                       measured), True, score)
@@ -141,18 +140,23 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
                 tools, refs, lo, enc_cfg, root, target, model, log)
             if score < target:
                 log.warning(
-                    f"连 crf={encode.fmt_crf(lo)} 都只有 VMAF "
+                    f"{em(src.name)}：连 crf={encode.fmt_crf(lo)} 都只有 VMAF "
                     f"{score:.2f}，达不到目标 {target}"
                 )
             best = CrfChoice(lo, _sample_bitrate(sample_bytes, span, measured),
                              score >= target, score)
-        log.info(f"[搜索] 定为 crf={em(encode.fmt_crf(best.crf))}"
+        log.info(f"[搜索] {em(src.name)} 定为 crf={em(encode.fmt_crf(best.crf))}"
                  f"（目标 VMAF {target}，{len(refs)} 段里最差 "
                  f"{best.worst_vmaf:.2f}，样本码率 "
                  f"{best.video_bitrate // 1000} kbps）")
         return best
     except (encode.EncodeError, vmaf.VmafError, OSError) as e:
-        log.warning(f"自适应 CRF 搜索失败（{e}），回退到配置里的固定 CRF")
+        # 被 Ctrl+C 杀掉的样本编码也会走到这里。那不是「搜索失败」，绝不能
+        # 回退到固定 CRF——那会在用户已经中断之后再开一个几小时的编码。
+        if proc.is_cancelled():
+            raise proc.Cancelled("搜索期间被中断") from e
+        log.warning(f"{em(src.name)}：自适应 CRF 搜索失败（{e}），"
+                    f"回退到配置里的固定 CRF")
         return None
     finally:
         tmpdir.cleanup()

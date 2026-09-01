@@ -111,6 +111,7 @@ class HappyPathTests(PipelineTestCase):
         self.assertEqual(rec["new_size"], len(self.encoded))
         self.assertEqual(rec["size"], 1000)
         self.assertAlmostEqual(rec["saving"], 0.6, places=3)
+        self.assertIn("vmaf", rec, "画质要记进去，不然只能 grep 日志")
 
     def test_existing_target_is_not_overwritten(self):
         victim = self.root / "a.av1.mkv"
@@ -203,6 +204,65 @@ class FailureTests(PipelineTestCase):
         with p1, p2, p3:
             with self.assertRaises(SystemExit):
                 pipeline.process_file(ctx, self.src)
+
+
+class VmafUnmeasurableTests(PipelineTestCase):
+    """量不出画质时原文件必须活着。
+
+    真实事故：一个 4K 片源在抽检第 3/5 段时抽样失败（临时目录在内存盘上被
+    撑爆），校验链把「量不出来」当成环境问题放行，那次跑的是
+    --delete-original，原文件就这么没了，而全片画质从来没被量过。
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              audio_codecs=[], audio_bitrates=[],
+                              audio_channels=[])
+
+    def run_with_spot_failure(self, vmaf_filters):
+        """走真实的 verify.run_all，只把抽检换成"这个文件量不出来"。"""
+        ctx = RunContext(
+            cfg=self.cfg,
+            tools=helpers.FakeTools(),
+            caps=caps.Caps(encoders=frozenset({"libsvtav1", "libx264"}),
+                           filters=frozenset(vmaf_filters)),
+            store=self.store,
+            outputs=files.OutputRegistry(),
+            stats=RunStats(),
+            encoder="av1",
+            keep=False,
+        )
+        p1, p2, _p3 = self.patches(
+            self.fake_encode(),
+            out_info=make_info(path=self.tmp_file(), video_codec="av1",
+                               size=len(self.encoded), duration=10.0,
+                               audio_codecs=[], audio_bitrates=[],
+                               audio_channels=[]))
+        spot = mock.Mock(return_value=(
+            None, None, "抽取样本片段失败：No space left on device"))
+        with p1, p2, \
+                mock.patch.object(pipeline.verify, "added_decode_errors",
+                                  return_value=[]), \
+                mock.patch.object(pipeline.verify, "vmaf_spot_check", spot):
+            return pipeline.process_file(ctx, self.src)
+
+    def test_sample_failure_keeps_the_original(self):
+        outcome = self.run_with_spot_failure({"libvmaf"})
+        self.assertEqual(outcome, pipeline.FAILED)
+        self.assertTrue(self.src.exists(), "画质没量出来，原文件绝不能删")
+        self.assertFalse((self.root / "a.av1.mkv").exists())
+        self.assertFalse(self.tmp_file().exists())
+        rec = self.store.last(self.src)
+        self.assertEqual(rec["action"], "failed")
+        self.assertIn("量不出 VMAF", rec["error"])
+        self.assertIn("No space left", rec["error"])
+
+    def test_build_without_libvmaf_still_passes(self):
+        """构建里根本没有 libvmaf：硬失败等于这台机器上没法用，降级放行。"""
+        outcome = self.run_with_spot_failure({"scale"})
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertTrue((self.root / "a.av1.mkv").exists())
 
 
 class SkipAndDryRunTests(PipelineTestCase):
@@ -381,6 +441,20 @@ class TargetRecheckTests(PipelineTestCase):
         self.assertIn("94.99", msg)
         self.assertIn("94.39", msg)
         self.assertIn("95.02", msg)
+
+    def test_below_target_is_recorded_in_the_results(self):
+        """只打日志的话，「哪些文件没达到目标」只能靠 grep 几万行日志。"""
+        self.run_with_spot((94.99, 94.39))
+        rec = self.store.last(self.src)
+        self.assertAlmostEqual(rec["vmaf"], 94.99)
+        self.assertAlmostEqual(rec["vmaf_worst"], 94.39)
+        self.assertIn("94.39", rec["below_target"])
+
+    def test_meeting_target_leaves_no_flag(self):
+        self.run_with_spot((95.5, 95.1))
+        rec = self.store.last(self.src)
+        self.assertIsNone(rec["below_target"])
+        self.assertAlmostEqual(rec["vmaf"], 95.5)
 
     def test_meeting_target_stays_quiet(self):
         outcome = self.run_with_spot((95.5, 95.1))

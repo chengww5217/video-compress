@@ -356,9 +356,21 @@ class RunAllTests(unittest.TestCase):
             self.run_all()
         self.assertIn("below threshold", str(cm.exception))
 
-    def test_unavailable_vmaf_only_warns(self):
+    def test_measurement_failure_is_a_hard_failure(self):
+        """有 libvmaf 却量不出这个文件——不能说通过，原文件可能跟着被删。"""
+        self.spot = (None, None, "抽取样本片段失败：No space left on device")
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("量不出 VMAF", str(cm.exception))
+        self.assertIn("No space left", str(cm.exception))
+
+    def test_build_without_libvmaf_only_warns(self):
+        """整个构建都没有 libvmaf：硬失败等于这台机器上没法用，降级告警。"""
         self.spot = (None, None, "libvmaf failed: no such filter")
-        self.assertEqual(self.run_all(), (None, None))
+        self.assertEqual(
+            verify.run_all(FakeTools(), Path("src.mp4"), self.out, self.orig,
+                           self.out_info, self.cfg, vmaf_available=False),
+            (None, None))
 
     def test_disabled_vmaf_passes(self):
         self.spot = (None, None, "")

@@ -83,6 +83,37 @@ class SegmentCmdTests(unittest.TestCase):
         self.assertIn("-dn", cmd)
         self.assertEqual(cmd[cmd.index("-crf") + 1], "0")
 
+    def test_progress_output_is_off(self):
+        """抽样失败的原因不能被进度行挤出错误信息（磁盘写满就这么丢过一次）。"""
+        self.assertIn("-nostats", self.cmd(10.0))
+
+
+class SampleWindowNestingTests(unittest.TestCase):
+    """搜索的样本窗口必须嵌在抽检的窗口里，两边才是同一把尺子。
+
+    段数相同时两边都以 (i+0.5)/段数 分位为中心，搜索的段更短，于是它量的内容
+    是抽检那段的正中间一块。段数不同的时候两组窗口可以完全不相交——实测就是
+    这么来的：搜索 4×10s 说 95.1，抽检 5×20s 量到 92.2，看的根本不是同一段。
+    """
+
+    def test_equal_counts_nest_the_windows(self):
+        duration, count = 6594.0, 5
+        search = vmaf.sample_starts(duration, 8.0, count)
+        check = vmaf.sample_starts(duration, 20.0, count)
+        self.assertEqual(len(search), len(check))
+        for s, c in zip(search, check):
+            self.assertGreaterEqual(s, c, "搜索窗口要落在抽检窗口内")
+            self.assertLessEqual(s + 8.0, c + 20.0)
+
+    def test_different_counts_can_miss_each_other_entirely(self):
+        duration = 6594.0
+        search = vmaf.sample_starts(duration, 10.0, 4)
+        check = vmaf.sample_starts(duration, 20.0, 5)
+        overlaps = sum(1 for s in search
+                       for c in check if s < c + 20.0 and c < s + 10.0)
+        self.assertEqual(overlaps, 0, "4 段和 5 段的取样点互不重叠")
+
+
 class SegmentStreamSelectionTests(unittest.TestCase):
     def test_attached_pictures_are_excluded(self):
         """0:v:0 会把封面图当视频流；真编码用的是 0:V，两边必须取同一条流。"""

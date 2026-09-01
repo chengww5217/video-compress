@@ -58,12 +58,18 @@ DEFAULTS = {
     "adaptive": {
         "enabled": True,
         "target_vmaf": 95.0,
-        # 搜索余量：样本最差段要过 target_vmaf + target_margin 才录取
-        "target_margin": 0.05,
+        # 搜索余量：样本最差段要过 target_vmaf + target_margin 才录取。
+        # 二分搜索必然收敛到录取线上（实测 45 次搜索的成绩全落在录取线上方
+        # 0.15 分以内），所以这个余量要吸收的是「样本外推到全片」的全部误差，
+        # 不是四舍五入的零头。
+        "target_margin": 0.5,
         "crf_min": 16,
         "crf_max": 50,
-        "sample_seconds": 10,
-        "sample_count": 4,
+        # 样本段数必须和 [verify] vmaf_segments 一致，两边的取样点才落在同一
+        # 批位置上（都以 (i+0.5)/段数 分位为中心）；段长比抽检短，搜索的窗口
+        # 就正好嵌在抽检窗口的正中间，量的是同一段内容。
+        "sample_seconds": 8,
+        "sample_count": 5,
         "search_step": 0.25,
         "require_target": True,
     },
@@ -90,6 +96,11 @@ DEFAULTS = {
         "workers": 1,
         "results_file": "logs/results.jsonl",
         "log_file": "logs/vcompress.log",
+        # 无损样本片段放哪里。留空 = 系统临时目录，但那在多数发行版上是
+        # 内存盘（tmpfs）：4K 片源的无损抽样约 500 Mbps，一段 20 秒 1.2 GB，
+        # 抽检要两份、搜索还要留几段，几个 G 的内存就这么没了，撑爆之后
+        # 抽样失败。默认放到项目目录下，和日志、记录在一块。
+        "temp_dir": "logs/tmp",
         "log_max_bytes": 5_242_880,
         "log_backups": 3,
         "use_recycle_bin": False,
