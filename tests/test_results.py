@@ -9,6 +9,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_info
+from vcompress import results
 from vcompress.results import ResultStore
 
 
@@ -98,10 +99,42 @@ class CacheFreshnessTests(unittest.TestCase):
                        kept=True)
         self.assertIsNotNone(self.store.is_cached(src))
 
-    def test_failed_runs_are_never_cached(self):
+    def test_failed_runs_are_retried_by_default(self):
+        """磁盘满、被 OOM 杀掉这类换个时间就好了，不该被记成"处理过"。"""
         src = self.write("a.mp4", 50)
         self.store.add("failed", make_info(path=src, size=50), error="boom")
         self.assertIsNone(self.store.is_cached(src))
+
+    def test_permanent_failure_is_cached(self):
+        """压不小是片源属性：再花几小时也是同一个答案，下次直接跳过。"""
+        src = self.write("a.mp4", 50)
+        self.store.add("failed", make_info(path=src, size=50),
+                       error="产物 60 字节，没比源文件 50 字节小",
+                       permanent=True)
+        self.assertIsNotNone(self.store.is_cached(src))
+
+    def test_permanent_failure_on_a_replaced_file_is_reprocessed(self):
+        """同名换了片源就该重新判：永久失败也不能盖住新文件。"""
+        src = self.write("a.mp4", 50)
+        self.store.add("failed", make_info(path=src, size=50),
+                       error="没比源文件小", permanent=True)
+        src.write_bytes(b"y" * 90)
+        self.assertIsNone(self.store.is_cached(src))
+
+    def test_permanent_flag_only_applies_to_failures(self):
+        self.assertFalse(results.is_permanent_failure(
+            {"action": "aborted", "permanent": True}))
+        self.assertFalse(results.is_permanent_failure({"action": "failed"}))
+        self.assertTrue(results.is_permanent_failure(
+            {"action": "failed", "permanent": True}))
+
+    def test_cached_reason_spells_out_a_failure(self):
+        """光说"上次失败了，本次跳过"，人只会以为这是个 bug。"""
+        reason = results.cached_reason(
+            {"action": "failed", "error": "没比源文件小"})
+        self.assertIn("没比源文件小", reason)
+        reason = results.cached_reason({"action": "skipped"})
+        self.assertIn("已跳过", reason)
 
     def test_records_without_a_size_are_trusted(self):
         src = self.write("a.mp4", 50)

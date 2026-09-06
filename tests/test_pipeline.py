@@ -188,6 +188,31 @@ class FailureTests(PipelineTestCase):
         self.assertEqual(outcome, pipeline.FAILED)
         self.assertIn("bad params", self.store.last(self.src)["error"])
 
+    def test_ordinary_failure_is_not_marked_permanent(self):
+        """画质不过、编码器报错这类下次该重试，不能记成不必重试。"""
+        self.run_one(self.fake_encode(), verify_ok=False)
+        rec = self.store.last(self.src)
+        self.assertIsNone(rec["permanent"])
+        self.assertIsNone(self.store.is_cached(self.src),
+                          "下次必须还会重试")
+
+    def test_permanent_failure_is_recorded_and_skipped_next_time(self):
+        """压不小是片源属性：记一笔，下次别再花几小时算同一个答案。"""
+        ctx = self.ctx()
+        boom = verify.PermanentVerifyError(
+            "产物 200 字节，没比源文件 100 字节小")
+        p1, p2, _p3 = self.patches(self.fake_encode())
+        with p1, p2, mock.patch.object(pipeline.verify, "run_all",
+                                       side_effect=boom):
+            outcome = pipeline.process_file(ctx, self.src)
+        self.assertEqual(outcome, pipeline.FAILED)
+        self.assertTrue(self.src.exists(), "原文件必须活着")
+        self.assertFalse(self.tmp_file().exists())
+        rec = self.store.last(self.src)
+        self.assertEqual(rec["action"], "failed")
+        self.assertTrue(rec["permanent"])
+        self.assertIsNotNone(self.store.is_cached(self.src))
+
     def test_probe_failure_is_recorded_without_touching_the_file(self):
         ctx = self.ctx()
         with mock.patch.object(pipeline.probe, "probe",

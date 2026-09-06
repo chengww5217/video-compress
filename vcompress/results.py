@@ -26,6 +26,28 @@ ACTION_LABELS = {
 def action_label(action: str) -> str:
     return ACTION_LABELS.get(action, action)
 
+
+def is_permanent_failure(rec: dict) -> bool:
+    """这条失败记录重跑也是同样结果吗。
+
+    失败默认要重试：磁盘满、被 OOM 杀掉、临时目录写不下去，换个时间就好了。
+    只有结论由片源和配置决定的失败（产物压不小、收益不够）才带 permanent，
+    那种重试只是把同一个答案再算几个小时。
+    """
+    return rec.get("action") == "failed" and bool(rec.get("permanent"))
+
+
+def cached_reason(rec: dict) -> str:
+    """[缓存] 日志里「为什么这次不处理它」那半句。
+
+    失败必须把原因带上：光说"上次失败了，本次跳过"，人只会觉得这是个 bug。
+    """
+    if rec.get("action") == "failed":
+        return (f"上次失败在「{rec.get('error') or '未记原因'}」，"
+                f"片源和配置没变，重跑还是同样结论")
+    return f"上次的结果是{action_label(rec.get('action', ''))}"
+
+
 # 只有攒够这么多行、且其中一半以上是被后来记录顶掉的旧行，才值得压实。
 # 一次处理一万个文件是正常的（那一万行都还有效），反复 --force 重跑才会
 # 让同一个路径攒下几十行。
@@ -112,9 +134,15 @@ class ResultStore:
 
         只按路径判断是不够的：同名文件被换成另一个片源（下载了更好的版本）时
         旧记录会让它被永远跳过。记录里已经有体积，顺手比一下就能发现。
+
+        失败的记录一般不算「处理过」——那多半是环境问题，下次该重试；只有
+        is_permanent_failure() 认定重跑无用的那种才算（见那个函数）。
         """
         rec = self.last(path)
-        if not rec or rec.get("action") not in CACHED_ACTIONS:
+        if not rec:
+            return None
+        if rec.get("action") not in CACHED_ACTIONS \
+                and not is_permanent_failure(rec):
             return None
         expected = self._expected_sizes(rec, path)
         if not expected:

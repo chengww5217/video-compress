@@ -174,9 +174,8 @@ def _pick_todo(files_found, store: ResultStore, force: bool) -> tuple:
         rec = None if force else store.is_cached(f)
         if rec:
             cached += 1
-            log.info(f"[缓存] {em(f.name)}：上次的结果是"
-                     f"{results.action_label(rec['action'])}，本次跳过"
-                     f"（要重跑加 --force）")
+            log.info(f"[缓存] {em(f.name)}：{results.cached_reason(rec)}，"
+                     f"本次跳过（要重跑加 --force）")
             continue
         todo.append(f)
     return todo, cached

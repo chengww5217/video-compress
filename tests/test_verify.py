@@ -10,7 +10,8 @@ from pathlib import Path
 import helpers
 from helpers import make_cfg, make_info
 from vcompress import verify, vmaf
-from vcompress.verify import check_basic, check_color, count_decode_errors
+from vcompress.verify import (check_basic, check_color, check_size,
+                             count_decode_errors)
 
 
 class CheckColorTests(unittest.TestCase):
@@ -70,33 +71,21 @@ class CheckBasicTests(unittest.TestCase):
 
     def test_happy_path(self):
         out = make_info(video_codec="av1", duration=600.2)
-        ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertTrue(ok, msg)
         self.assertEqual(msg, "")
 
     def test_duration_mismatch_fails(self):
         out = make_info(video_codec="av1", duration=601.5)
-        ok, msg = check_basic(self.orig, out, 100, 50, self.cfg)
+        ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertFalse(ok)
         self.assertIn("时长", msg)
 
     def test_missing_video_stream_fails(self):
         out = make_info(video_codec="", duration=600.0)
-        ok, msg = check_basic(self.orig, out, 100, 50, self.cfg)
+        ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertFalse(ok)
         self.assertIn("没有视频流", msg)
-
-    def test_output_not_smaller_fails(self):
-        out = make_info(video_codec="av1", duration=600.0)
-        ok, msg = check_basic(self.orig, out, 100, 101, self.cfg)
-        self.assertFalse(ok)
-        self.assertIn("没比源文件", msg)
-
-    def test_tiny_saving_discarded(self):
-        out = make_info(video_codec="av1", duration=600.0)
-        ok, msg = check_basic(self.orig, out, 100_000_000, 98_000_000, self.cfg)
-        self.assertFalse(ok)
-        self.assertIn("丢弃产物", msg)
 
     def test_dropped_audio_track_fails(self):
         orig = make_info(duration=600.0, audio_codecs=["dts", "aac"],
@@ -105,7 +94,7 @@ class CheckBasicTests(unittest.TestCase):
         out = make_info(video_codec="av1", duration=600.0,
                         audio_codecs=["opus"], audio_bitrates=[480_000],
                         audio_channels=[6])
-        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(orig, out, self.cfg)
         self.assertFalse(ok)
         self.assertIn("音轨条数变了：2 -> 1", msg)
 
@@ -113,7 +102,7 @@ class CheckBasicTests(unittest.TestCase):
         orig = make_info(duration=600.0, subtitle_codecs=["subrip", "ass"])
         out = make_info(video_codec="av1", duration=600.0,
                         subtitle_codecs=["subrip"])
-        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(orig, out, self.cfg)
         self.assertFalse(ok)
         self.assertIn("字幕条数变了：2 -> 1", msg)
 
@@ -122,21 +111,49 @@ class CheckBasicTests(unittest.TestCase):
                          subtitle_codecs=["mov_text"])
         out = make_info(video_codec="av1", duration=600.0,
                         audio_codecs=["opus"], subtitle_codecs=["subrip"])
-        ok, msg = check_basic(orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(orig, out, self.cfg)
         self.assertTrue(ok, msg)
 
     def test_resolution_change_fails(self):
         """滤镜链写错或编码器悄悄降采样，这里必须拦住。"""
         out = make_info(video_codec="av1", duration=600.0,
                         width=1280, height=720)
-        ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertFalse(ok)
         self.assertIn("分辨率变了：1920x1080 -> 1280x720", msg)
 
     def test_unknown_resolution_is_not_a_failure(self):
         out = make_info(video_codec="av1", duration=600.0, width=0, height=0)
-        ok, msg = check_basic(self.orig, out, 100_000_000, 40_000_000, self.cfg)
+        ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertTrue(ok, msg)
+
+
+class CheckSizeTests(unittest.TestCase):
+    """体积与实际收益。和 check_basic 分开是因为失败的后果不同：这个结论重跑
+    不会变，调用方据此让文件下次直接跳过。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+
+    def test_real_saving_passes(self):
+        ok, msg = check_size(100_000_000, 40_000_000, self.cfg)
+        self.assertTrue(ok, msg)
+        self.assertEqual(msg, "")
+
+    def test_output_not_smaller_fails(self):
+        ok, msg = check_size(100, 101, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("没比源文件", msg)
+
+    def test_equal_size_fails(self):
+        ok, msg = check_size(100, 100, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("没比源文件", msg)
+
+    def test_tiny_saving_discarded(self):
+        ok, msg = check_size(100_000_000, 98_000_000, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("丢弃产物", msg)
 
 
 class DecodeErrorCountTests(unittest.TestCase):
@@ -349,6 +366,26 @@ class RunAllTests(unittest.TestCase):
             self.run_all()
         self.assertIn("没比源文件", str(cm.exception))
         self.assertEqual(self.calls, [])
+
+    def test_size_verdict_is_permanent(self):
+        """压不小是片源属性，重跑还是同一个数——调用方据此不再重试。"""
+        self.out.write_bytes(b"x" * 200_000)
+        with self.assertRaises(verify.PermanentVerifyError):
+            self.run_all()
+
+    def test_structural_failures_stay_retryable(self):
+        """时长对不上更像这次编码出了岔子（写到一半的产物），下次该重试。"""
+        self.out_info.duration = 700.0
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertNotIsInstance(cm.exception, verify.PermanentVerifyError)
+
+    def test_low_vmaf_stays_retryable(self):
+        """画质不过也不算永久：换个 target/编码器重跑是有意义的。"""
+        self.spot = (70.0, 68.0, "vmaf mean 70.00 below threshold 93.0")
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertNotIsInstance(cm.exception, verify.PermanentVerifyError)
 
     def test_color_metadata_loss_stops_before_vmaf(self):
         self.orig.color_transfer = "smpte2084"

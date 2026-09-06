@@ -324,10 +324,17 @@ def _handle_failure(ctx: RunContext, src: Path, info, tmp: Path,
         raise exc  # SystemExit / MemoryError 这类不该被当成“这个文件失败了”
 
     log.error(f"[失败] {em(src.name)}：{exc}")
+    # 结论由片源和配置决定的失败，记一笔「不必重试」：不然下次跑同一个目录，
+    # 又是一个多小时搜索加几小时编码，换来同一句话
+    permanent = isinstance(exc, verify.PermanentVerifyError)
+    if permanent:
+        log.info(f"{em(src.name)}：这个结论重跑也一样，下次会直接跳过"
+                 f"（想再试一次加 {em('--force')}）")
     kept_tmp = None
     if ctx.cfg["verify"].get("keep_failed_output", False):
         kept_tmp = files.keep_failed_output(tmp, src, ctx.out_ext)
     ctx.store.add("failed", info, stage="process", error=str(exc)[:500],
+                  permanent=permanent or None,
                   failed_output=str(kept_tmp) if kept_tmp else None)
     if kept_tmp is None:
         files.remove_tmp(tmp)

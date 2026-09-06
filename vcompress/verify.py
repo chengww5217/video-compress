@@ -1,7 +1,8 @@
-"""产物校验：基础属性一致、色彩元数据一致、解码无错、VMAF 抽检。
+"""产物校验：基础属性一致、体积真的变小、色彩元数据一致、解码无错、VMAF 抽检。
 
-对外只需要 run_all()：四步校验的顺序（按代价从便宜到贵）、哪一步失败算硬失败、
-哪一步不可用只告警，都是校验策略的一部分，不该散落在调用方里。
+对外只需要 run_all()：五步校验的顺序（按代价从便宜到贵）、哪一步失败算硬失败、
+哪一步失败重跑也没用、哪一步不可用只告警，都是校验策略的一部分，不该散落在
+调用方里。
 
 解码校验以源文件为基线：片源自带的解码错误不算产物的问题，详见
 added_decode_errors()。
@@ -26,6 +27,18 @@ _REPEAT_RE = re.compile(r"Last message repeated (\d+) times?")
 
 class VerifyError(RuntimeError):
     """产物没通过校验；调用方据此丢弃产物并保留原文件。"""
+
+
+class PermanentVerifyError(VerifyError):
+    """结论由片源和配置决定的校验失败：重跑必然一样，不值得再花几小时。
+
+    只有「换个时间、换台机器，只要片源和配置没变就一定同样结论」的判定配用它，
+    目前只有体积与实际收益。磁盘满、被 OOM 杀掉、量不出 VMAF 这类是环境问题，
+    换个时间重试是有意义的，绝不能归到这里。
+
+    色彩/HDR 元数据带不过来也故意不算：那是 ffmpeg 构建的能力问题，换个构建就
+    好了，不该让文件被永久挡住。
+    """
 
 
 def decode_errors(ffmpeg: str, path: Path):
@@ -108,7 +121,12 @@ def added_decode_errors(ffmpeg: str, out: Path, src: Path, log=None):
     return added
 
 
-def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
+def check_basic(orig_info, out_info, cfg):
+    """结构是否一致：时长、有没有视频流、分辨率、音轨与字幕条数。
+
+    体积和收益不在这里，见 check_size()——那个结论重跑不会变，这几项会（写到
+    一半的产物重跑一次就好了），两者的后果不同，不该混在一个函数里。
+    """
     max_diff = to_float(cfg["verify"].get("max_duration_diff_s"), 0.5)
     if orig_info.duration > 0 and out_info.duration > 0:
         diff = abs(orig_info.duration - out_info.duration)
@@ -130,6 +148,17 @@ def check_basic(orig_info, out_info, orig_size: int, new_size: int, cfg):
     ):
         if before != after:
             return False, f"{kind}条数变了：{before} -> {after}"
+    return True, ""
+
+
+def check_size(orig_size: int, new_size: int, cfg):
+    """产物有没有真的变小、收益够不够。
+
+    单独成一个函数是因为它的失败和别的不一样：这个结论只取决于片源和编码配置，
+    换个时间重跑必然还是同一个数，所以调用方拿 PermanentVerifyError 把它记成
+    「不必重试」。判断本身和 [skip] min_saving_ratio 那道编码前的门槛是同一个，
+    只是那边靠样本外推、这边量的是真产物。
+    """
     if new_size >= orig_size:
         return False, f"产物 {new_size} 字节，没比源文件 {orig_size} 字节小"
     min_saving = to_float(cfg["verify"].get("min_actual_saving"), 0.05)
@@ -301,12 +330,18 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     就能下，没有理由先花十几分钟解码。实际踩过一次，一个 AV1 产物比 h264 源还
     大，判它出局之前先白解了一遍全片。
 
+    体积/收益那一项抛 PermanentVerifyError：同样的片源和配置重跑必然同样结论，
+    调用方据此让它下次直接跳过，而不是再烧几小时得到同一个答案。
+
     `vmaf_available` 是构建能力（caps 里有没有 libvmaf 滤镜），由调用方给。
     """
-    ok, msg = check_basic(orig_info, out_info, orig_info.size,
-                          out.stat().st_size, cfg)
+    ok, msg = check_basic(orig_info, out_info, cfg)
     if not ok:
         raise VerifyError(msg)
+
+    ok, msg = check_size(orig_info.size, out.stat().st_size, cfg)
+    if not ok:
+        raise PermanentVerifyError(msg)
 
     ok, msg = check_color(orig_info, out_info, cfg)
     if not ok:
