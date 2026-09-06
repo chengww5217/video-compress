@@ -11,6 +11,8 @@ import copy
 import tomllib
 from pathlib import Path
 
+from .files import SORT_ORDERS
+
 DEFAULTS = {
     "tools": {
         "ffmpeg": "",
@@ -94,6 +96,8 @@ DEFAULTS = {
     },
     "run": {
         "workers": 1,
+        # 文件处理顺序，--sort 可临时覆盖；取值见 files.SORT_ORDERS
+        "sort": "name",
         "results_file": "logs/results.jsonl",
         "log_file": "logs/vcompress.log",
         # 无损样本片段放哪里。留空 = 系统临时目录，但那在多数发行版上是
@@ -282,6 +286,8 @@ def _check_semantics(cfg: dict, errors: list):
 
     if int(cfg["run"]["workers"]) < 1:
         errors.append("[run] workers 至少是 1")
+    if cfg["run"]["sort"] not in SORT_ORDERS:
+        errors.append(f"[run] sort 只能是：{'/'.join(SORT_ORDERS)}")
     if int(cfg["run"]["log_backups"]) < 0:
         errors.append("[run] log_backups 不能是负数")
     if int(cfg["run"]["shutdown_delay_seconds"]) < 0:

@@ -93,6 +93,7 @@ keep_failed_output = false # 校验没过时把产物留成 .failed.mkv 而不�
 
 [run]
 workers = 1                # 并发处理的文件数（单文件编码本身已是多线程）
+sort = "name"              # 处理顺序：name、name-desc=路径名 A→Z、Z→A / size、size-desc=体积小→大、大→小 / mtime、mtime-desc=修改时间旧→新、新→旧 / none=按传入顺序（--sort 可临时覆盖）
 results_file = "logs/results.jsonl"
 log_file = "logs/vcompress.log"
 # 无损样本片段放哪里。留空 = 系统临时目录，但那多半是内存盘（tmpfs）：4K 片源

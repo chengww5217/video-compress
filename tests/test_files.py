@@ -3,6 +3,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import errno
+import os
 import tempfile
 import threading
 import unittest
@@ -141,6 +142,99 @@ class GatherFilesTests(unittest.TestCase):
             found = self.gather([empty], True, {".mp4"})
         self.assertEqual(found, [])
         self.assertTrue(any("empty" in line for line in cm.output))
+
+
+class SortFilesTests(unittest.TestCase):
+    """处理顺序：默认按路径名，也可以按体积、修改时间或传入顺序。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def write(self, name, size=1, mtime=None):
+        p = self.root / name
+        p.write_bytes(b"x" * size)
+        if mtime is not None:
+            os.utime(p, (mtime, mtime))
+        return p
+
+    def test_name_sorts_by_path(self):
+        c = self.write("c.mp4")
+        a = self.write("a.mp4")
+        self.assertEqual(files.sort_files([c, a], "name"), [a, c])
+
+    def test_name_desc_is_the_exact_reverse(self):
+        c = self.write("c.mp4")
+        a = self.write("a.mp4")
+        b = self.write("b.mp4")
+        self.assertEqual(files.sort_files([a, c, b], "name-desc"), [c, b, a])
+
+    def test_size_small_files_first(self):
+        big = self.write("big.mp4", 300)
+        mid = self.write("mid.mp4", 200)
+        small = self.write("small.mp4", 100)
+        self.assertEqual(files.sort_files([big, mid, small], "size"),
+                         [small, mid, big])
+
+    def test_size_desc_big_files_first(self):
+        big = self.write("big.mp4", 300)
+        mid = self.write("mid.mp4", 200)
+        small = self.write("small.mp4", 100)
+        self.assertEqual(files.sort_files([big, mid, small], "size-desc"),
+                         [big, mid, small])
+
+    def test_mtime_oldest_first(self):
+        new = self.write("new.mp4", mtime=2_000_000_000)
+        old = self.write("old.mp4", mtime=1_000_000_000)
+        self.assertEqual(files.sort_files([new, old], "mtime"), [old, new])
+
+    def test_mtime_desc_newest_first(self):
+        new = self.write("new.mp4", mtime=2_000_000_000)
+        old = self.write("old.mp4", mtime=1_000_000_000)
+        self.assertEqual(files.sort_files([new, old], "mtime-desc"), [new, old])
+
+    def test_none_keeps_the_given_order(self):
+        b = self.write("b.mp4")
+        a = self.write("a.mp4")
+        self.assertEqual(files.sort_files([b, a], "none"), [b, a])
+
+    def test_ties_fall_back_to_the_path(self):
+        """属性值并列时按路径分先后：顺序仍然是确定的，方向反转也不乱。"""
+        y = self.write("y.mp4", 100)
+        x = self.write("x.mp4", 100)
+        self.assertEqual(files.sort_files([y, x], "size"), [x, y])
+        self.assertEqual(files.sort_files([y, x], "size-desc"), [x, y])
+
+    def test_unstatable_files_sort_last_in_both_directions(self):
+        """排序时文件刚好被删：排序本身不许炸，怎么排都放最后。"""
+
+        class Ghost:
+            def stat(self):
+                raise OSError("gone")
+
+            def __str__(self):
+                return "/gone/z.mp4"
+
+        ghost = Ghost()
+        a = self.write("a.mp4", 100)
+        self.assertIs(files.sort_files([ghost, a], "size")[-1], ghost)
+        self.assertIs(files.sort_files([ghost, a], "size-desc")[-1], ghost)
+
+    def test_unknown_order_is_rejected(self):
+        with self.assertRaises(ValueError):
+            files.sort_files([], "biggest")
+
+    def test_gather_files_applies_the_sort(self):
+        """gather_files 收完就排好序：size 和默认的 name 得到不同顺序。"""
+        b = self.write("b.mp4", 100)
+        a = self.write("a.mp4", 300)
+        found, _ = gather_files([b, a], False, {".mp4"}, "size")
+        self.assertEqual(found, [b, a])
+        found, _ = gather_files([b, a], False, {".mp4"})
+        self.assertEqual(found, [a, b])
 
 
 class CleanStaleTmpTests(unittest.TestCase):

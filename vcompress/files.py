@@ -21,6 +21,22 @@ INTERMEDIATE_INFIXES = (".tmp.", ".failed.")
 TMP_INFIX = ".tmp"
 FAILED_INFIX = ".failed"
 
+# 处理顺序的可选值（--sort / [run] sort）。name 是默认：两次跑同一个目录
+# 顺序一致，日志和 results.jsonl 才好对照
+SORT_ORDERS = ("name", "name-desc", "size", "size-desc", "mtime",
+               "mtime-desc", "none")
+
+# 各顺序的人话名字，打日志用
+SORT_LABELS = {
+    "name": "路径名",
+    "name-desc": "路径名（Z→A）",
+    "size": "体积（小→大）",
+    "size-desc": "体积（大→小）",
+    "mtime": "修改时间（旧→新）",
+    "mtime-desc": "修改时间（新→旧）",
+    "none": "传入顺序",
+}
+
 
 def is_intermediate(name: str) -> bool:
     return any(infix in name for infix in INTERMEDIATE_INFIXES)
@@ -49,11 +65,40 @@ def output_name(src: Path, encoder: str, out_ext: str) -> Path:
     return src.with_name(f"{src.stem}.{encoder}{out_ext}")
 
 
-def gather_files(paths, recursive: bool, extensions: set):
+def _stat_key(f: Path, attr: str, descending: bool):
+    """按 stat 属性排序的 key。属性值并列时按路径分先后；stat 不了（扫到之后
+    文件被删了这类竞态）的排最后，排序本身不许炸。"""
+    try:
+        value = getattr(f.stat(), attr)
+    except OSError:
+        return (1, 0, str(f))
+    return (0, -value if descending else value, str(f))
+
+
+def sort_files(files, order: str):
+    """按指定方式排序待处理文件，返回新列表。order 取值见 SORT_ORDERS。"""
+    if order == "none":
+        return list(files)
+    if order == "name":
+        return sorted(files)
+    if order == "name-desc":
+        return sorted(files, reverse=True)
+    if order not in SORT_ORDERS:
+        raise ValueError(f"未知的排序方式 {order!r}"
+                         f"（可用：{'/'.join(SORT_ORDERS)}）")
+    attr = "st_size" if order.startswith("size") else "st_mtime_ns"
+    return sorted(files,
+                  key=lambda f: _stat_key(f, attr, order.endswith("-desc")))
+
+
+def gather_files(paths, recursive: bool, extensions: set, sort: str = "name"):
     """收集要处理的文件，返回 (文件列表, 失效路径列表)。
 
     失效路径 = 显式传入但不存在/暂不可用的路径。调用方据此区分「没有活干」
     和「路径全写错了」。
+
+    文件列表按 sort 排序（默认 name，见 SORT_ORDERS）。none 保留发现顺序：
+    按命令行传参的先后，目录里的文件按扫描到的先后。
     """
     files = []
     invalid = []
@@ -90,7 +135,7 @@ def gather_files(paths, recursive: bool, extensions: set):
         if r not in seen:
             seen.add(r)
             unique.append(f)
-    return sorted(unique), invalid
+    return sort_files(unique, sort), invalid
 
 
 def clean_stale_tmp(files, out_ext: str):

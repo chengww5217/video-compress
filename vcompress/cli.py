@@ -107,6 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
                     help="不递归子目录")
     ap.add_argument("--workers", type=int, default=None,
                     help="并发处理的文件数")
+    ap.add_argument("--sort", default=None, metavar="方式",
+                    choices=files.SORT_ORDERS,
+                    help="处理顺序：name/name-desc=路径名 A→Z/Z→A（默认 name）、"
+                         "size/size-desc=体积小→大/大→小、"
+                         "mtime/mtime-desc=修改时间旧→新/新→旧、"
+                         "none=按传入与扫描顺序（默认取自 [run] sort）")
     # 候选值来自配置里的 [encode.*] 子表，不在这里硬编码
     ap.add_argument("--encoder", default=None,
                     help="覆盖 [encode] encoder，名字必须有对应的 "
@@ -222,7 +228,7 @@ def _report(stats: RunStats, store: ResultStore, elapsed: float = 0.0) -> None:
 
 
 def _log_settings(cfg: dict, encoder: str, adaptive: bool, keep: bool,
-                  recycle: bool, workers: int, dry_run: bool,
+                  recycle: bool, workers: int, sort: str, dry_run: bool,
                   output_dir=None) -> None:
     """开跑之前把这次的关键设置摆在控制台上，省得回头猜是按什么档压的。"""
     enc_cfg = cfg["encode"][encoder]
@@ -239,6 +245,8 @@ def _log_settings(cfg: dict, encoder: str, adaptive: bool, keep: bool,
         bits.append(f"输出到 {em(str(output_dir))}")
     if workers > 1:
         bits.append(f"并发 {workers}")
+    if sort != "name":
+        bits.append(f"处理顺序 {em(files.SORT_LABELS[sort])}")
     if dry_run:
         bits.append(em("预览模式，不改任何文件"))
     log.info("本次设置：" + "，".join(bits))
@@ -299,8 +307,10 @@ def main(argv=None) -> int:
     if not preflight(caps, cfg, encoder, args.adaptive):
         return EXIT_FAILED
 
+    sort_order = args.sort or run_cfg["sort"]
     found, invalid = files.gather_files(args.paths, args.recursive,
-                                        set(cfg["skip"]["extensions"]))
+                                        set(cfg["skip"]["extensions"]),
+                                        sort_order)
     if not found:
         if len(invalid) == len(args.paths):
             # 一个有效路径都没有：多半是路径写错了，按用法错误退出
@@ -320,7 +330,7 @@ def main(argv=None) -> int:
         keep = not bool(run_cfg["delete_original"])
     recycle = args.recycle or bool(run_cfg["use_recycle_bin"])
     _log_settings(cfg, encoder, args.adaptive, keep, recycle, workers,
-                  args.dry_run, output_dir)
+                  sort_order, args.dry_run, output_dir)
 
     store = ResultStore(config.resolve_run_path(cfg_dir, run_cfg["results_file"]))
     todo, cached_skipped = _pick_todo(found, store, args.force)

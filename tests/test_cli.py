@@ -24,11 +24,13 @@ class ParserTests(unittest.TestCase):
         self.assertFalse(args.dry_run)
         self.assertIsNone(args.encoder)
         self.assertIsNone(args.config)
+        self.assertIsNone(args.sort)
 
     def test_flags(self):
         args = cli.build_parser().parse_args(
             ["a.mp4", "b.mkv", "--dry-run", "--no-recursive", "--no-adaptive",
              "--keep", "--recycle", "--force", "--workers", "3",
+             "--sort", "size-desc",
              "--encoder", "x265", "-o", "/tmp/out"])
         self.assertEqual(args.paths, ["a.mp4", "b.mkv"])
         self.assertFalse(args.recursive)
@@ -38,8 +40,14 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(args.recycle)
         self.assertTrue(args.force)
         self.assertEqual(args.workers, 3)
+        self.assertEqual(args.sort, "size-desc")
         self.assertEqual(args.encoder, "x265")
         self.assertEqual(args.output, "/tmp/out")
+
+    def test_unknown_sort_is_rejected(self):
+        """顺序候选是封闭集合，argparse 直接把拼错的拦下来（exit 2）。"""
+        with self.assertRaises(SystemExit):
+            cli.build_parser().parse_args(["a.mp4", "--sort", "biggest"])
 
     def test_encoder_is_not_a_hardcoded_choice(self):
         """编码器候选来自配置，argparse 不该先把没见过的名字拒掉。"""
@@ -313,6 +321,21 @@ class MainEarlyExitTests(unittest.TestCase):
                            "--config", str(p)])
         self.assertEqual(rc, cli.EXIT_OK)
         self.assertEqual(run.call_count, 1)
+
+    def test_sort_from_the_config_reaches_file_discovery(self):
+        p = self.write_cfg('sort = "size"\n')
+        with mock.patch.object(cli.files, "gather_files",
+                               return_value=([], [])) as gather:
+            rc = cli.main([str(self.root), "--config", str(p)])
+        self.assertEqual(rc, cli.EXIT_OK)
+        self.assertEqual(gather.call_args.args[3], "size")
+
+    def test_sort_cli_overrides_the_config(self):
+        p = self.write_cfg('sort = "mtime"\n')
+        with mock.patch.object(cli.files, "gather_files",
+                               return_value=([], [])) as gather:
+            cli.main([str(self.root), "--config", str(p), "--sort", "none"])
+        self.assertEqual(gather.call_args.args[3], "none")
 
 
 class MainShutdownTests(unittest.TestCase):

@@ -36,6 +36,7 @@ vcompress ~/videos --dry-run
 | `--keep` | 明确保留原文件（默认行为） |
 | `--encoder x265` | 换编码器（播放兼容性更好，体积略大） |
 | `--workers N` | 并发处理多个文件 |
+| `--sort 方式` | 处理顺序（默认按路径名）：`name-desc` 反序、`size`/`size-desc` 按体积、`mtime`/`mtime-desc` 按修改时间、`none` 按传入顺序 |
 | `--recycle` | 删除原文件时进回收站 |
 | `--force` | 忽略缓存重新处理 |
 

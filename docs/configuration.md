@@ -109,6 +109,7 @@ VMAF 抽检的判定细节、色彩/HDR 比对原理见 [architecture.md](archit
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `workers` | 1 | 并发处理的文件数 |
+| `sort` | `name` | 文件处理顺序，`--sort` 可临时覆盖：`name`/`name-desc` 按路径名 A→Z/Z→A（默认，多次运行顺序一致）、`size`/`size-desc` 按体积小→大/大→小、`mtime`/`mtime-desc` 按修改时间旧→新/新→旧、`none` 按传入与扫描顺序 |
 | `results_file` | `logs/results.jsonl` | 处理记录（相对路径按配置文件所在目录解析） |
 | `log_file` | `logs/vcompress.log` | 日志文件（实际按日期分卷，写成 `vcompress-2026-08-26.log` 这样） |
 | `temp_dir` | `logs/tmp` | 无损样本片段放哪里；留空 = 系统临时目录 |

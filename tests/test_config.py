@@ -178,6 +178,16 @@ class ValidationTests(unittest.TestCase):
     def test_zero_workers_is_rejected(self):
         self.assert_rejected({"run": {"workers": 0}}, "至少是 1")
 
+    def test_unknown_sort_is_rejected(self):
+        self.assert_rejected({"run": {"sort": "biggest"}}, "sort",
+                             "name/name-desc")
+
+    def test_every_sort_order_is_accepted(self):
+        for order in ("name", "name-desc", "size", "size-desc", "mtime",
+                      "mtime-desc", "none"):
+            cfg = config.normalise({"run": {"sort": order}})
+            self.assertEqual(cfg["run"]["sort"], order)
+
     def test_out_of_range_vmaf_threshold_is_rejected(self):
         self.assert_rejected({"verify": {"vmaf_threshold": 120.0}},
                              "vmaf_threshold")
