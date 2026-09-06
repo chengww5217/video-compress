@@ -1,7 +1,7 @@
-"""产物校验：解码无错、基础属性一致、色彩元数据一致、VMAF 抽检。
+"""产物校验：基础属性一致、色彩元数据一致、解码无错、VMAF 抽检。
 
-对外只需要 run_all()：四步校验的顺序、哪一步失败算硬失败、哪一步不可用只
-告警，都是校验策略的一部分，不该散落在调用方里。
+对外只需要 run_all()：四步校验的顺序（按代价从便宜到贵）、哪一步失败算硬失败、
+哪一步不可用只告警，都是校验策略的一部分，不该散落在调用方里。
 
 解码校验以源文件为基线：片源自带的解码错误不算产物的问题，详见
 added_decode_errors()。
@@ -288,16 +288,21 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             vmaf_available: bool = True):
     """跑完整校验链，任何硬失败抛 VerifyError；返回 (VMAF 均值, 最低段)。
 
-    两个值都可能为 None（这个构建量不了 VMAF 时）。顺序是刻意的：先做便宜的
-    （解码、时长、体积、色彩元数据），最后才做最贵的 VMAF 抽检。
+    两个值都可能为 None（这个构建量不了 VMAF 时）。顺序是按代价排的，越便宜的
+    越先跑：
+
+    1. 时长 / 分辨率 / 流数量 / 体积 / 色彩与 HDR 元数据——只比 ffprobe 已经读
+       出来的字段加一次 stat()，白给；
+    2. 解码校验——把产物整个解一遍（产物报错时还要再解一遍源做基线），实测一部
+       电影十几分钟；
+    3. VMAF 抽检——抽无损片段再逐帧打分，最贵。
+
+    第 1 步必须排在解码前面：体积没比源文件小、时长差太多这类结论，光看元数据
+    就能下，没有理由先花十几分钟解码。实际踩过一次，一个 AV1 产物比 h264 源还
+    大，判它出局之前先白解了一遍全片。
 
     `vmaf_available` 是构建能力（caps 里有没有 libvmaf 滤镜），由调用方给。
     """
-    if cfg["verify"].get("decode_check", True):
-        errs = added_decode_errors(tools.ffmpeg, out, src, log=log)
-        if errs:
-            raise VerifyError("解码校验没过：" + "；".join(errs[:3]))
-
     ok, msg = check_basic(orig_info, out_info, orig_info.size,
                           out.stat().st_size, cfg)
     if not ok:
@@ -306,6 +311,11 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     ok, msg = check_color(orig_info, out_info, cfg)
     if not ok:
         raise VerifyError(msg)
+
+    if cfg["verify"].get("decode_check", True):
+        errs = added_decode_errors(tools.ffmpeg, out, src, log=log)
+        if errs:
+            raise VerifyError("解码校验没过：" + "；".join(errs[:3]))
 
     mean, worst, msg = vmaf_spot_check(tools, src, out, orig_info.duration,
                                        cfg, log=log, fps=orig_info.fps,

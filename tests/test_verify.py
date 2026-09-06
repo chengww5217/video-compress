@@ -272,7 +272,7 @@ class AddedDecodeErrorTests(unittest.TestCase):
 
 
 class RunAllTests(unittest.TestCase):
-    """校验链的编排：便宜的检查先跑，环境缺能力只告警，画质不过才算失败。"""
+    """校验链的编排：按代价从便宜到贵，环境缺能力只告警，画质不过才算失败。"""
 
     def setUp(self):
         self.cfg = make_cfg()
@@ -340,7 +340,15 @@ class RunAllTests(unittest.TestCase):
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
         self.assertIn("时长差了", str(cm.exception))
-        self.assertEqual(self.calls, ["decode"])
+        self.assertEqual(self.calls, [], "元数据就能判的事，不该先解码")
+
+    def test_bigger_output_is_judged_without_decoding(self):
+        """产物比源文件大：这是 stat() 就能下的结论，别先白解一遍全片。"""
+        self.out.write_bytes(b"x" * 200_000)
+        with self.assertRaises(verify.VerifyError) as cm:
+            self.run_all()
+        self.assertIn("没比源文件", str(cm.exception))
+        self.assertEqual(self.calls, [])
 
     def test_color_metadata_loss_stops_before_vmaf(self):
         self.orig.color_transfer = "smpte2084"
@@ -348,7 +356,7 @@ class RunAllTests(unittest.TestCase):
         with self.assertRaises(verify.VerifyError) as cm:
             self.run_all()
         self.assertIn("色彩/HDR 元数据变了", str(cm.exception))
-        self.assertEqual(self.calls, ["decode"], "vmaf must not have run")
+        self.assertEqual(self.calls, [], "元数据就能判的事，不该先解码")
 
     def test_low_vmaf_is_a_failure(self):
         self.spot = (70.0, 68.0, "vmaf mean 70.00 below threshold 93.0")
