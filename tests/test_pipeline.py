@@ -200,7 +200,7 @@ class FailureTests(PipelineTestCase):
         """压不小是片源属性：记一笔，下次别再花几小时算同一个答案。"""
         ctx = self.ctx()
         boom = verify.PermanentVerifyError(
-            "产物 200 字节，没比源文件 100 字节小")
+            "产物没比源文件小：100 B -> 200 B（+100.0%）")
         p1, p2, _p3 = self.patches(self.fake_encode())
         with p1, p2, mock.patch.object(pipeline.verify, "run_all",
                                        side_effect=boom):

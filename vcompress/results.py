@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .logfmt import em
+from .util import fmt_size_change
 
 log = logging.getLogger("vcompress")
 
@@ -154,7 +155,7 @@ class ResultStore:
         if actual in expected:
             return rec
         log.info(f"[重查] {em(path.name)}：体积和上次记录不一致"
-                 f"（{sorted(expected)[0]} -> {actual} 字节），重新处理")
+                 f"（{fmt_size_change(sorted(expected)[0], actual)}），重新处理")
         return None
 
     @staticmethod

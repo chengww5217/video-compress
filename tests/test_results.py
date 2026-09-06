@@ -109,7 +109,7 @@ class CacheFreshnessTests(unittest.TestCase):
         """压不小是片源属性：再花几小时也是同一个答案，下次直接跳过。"""
         src = self.write("a.mp4", 50)
         self.store.add("failed", make_info(path=src, size=50),
-                       error="产物 60 字节，没比源文件 50 字节小",
+                       error="产物没比源文件小：50 B -> 60 B（+20.0%）",
                        permanent=True)
         self.assertIsNotNone(self.store.is_cached(src))
 

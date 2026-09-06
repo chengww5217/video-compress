@@ -10,7 +10,7 @@ from pathlib import Path
 
 from . import encode, proc, scratch, vmaf
 from .logfmt import em
-from .util import to_float, to_int
+from .util import fmt_size, to_float, to_int
 
 
 def _encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
@@ -66,7 +66,7 @@ def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
         total_bytes += size
         measured += 1
         log.debug(f"[搜索] crf={encode.fmt_crf(crf)} 第 {i + 1}/{len(refs)} 段："
-                  f"VMAF {score:.2f}，{size} 字节")
+                  f"VMAF {score:.2f}，{fmt_size(size)}")
         worst = score if worst is None else min(worst, score)
         if worst < target:
             break

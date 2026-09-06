@@ -14,7 +14,7 @@ from pathlib import Path
 
 from . import proc, scratch, vmaf
 from .logfmt import em
-from .util import to_float, to_int
+from .util import fmt_size, fmt_size_change, to_float, to_int
 
 # 收集上限：一个真损坏的文件能刷出成千上万行，留够比对用的量就行
 MAX_DECODE_ERRORS = 500
@@ -160,11 +160,13 @@ def check_size(orig_size: int, new_size: int, cfg):
     只是那边靠样本外推、这边量的是真产物。
     """
     if new_size >= orig_size:
-        return False, f"产物 {new_size} 字节，没比源文件 {orig_size} 字节小"
+        return False, f"产物没比源文件小：{fmt_size_change(orig_size, new_size)}"
     min_saving = to_float(cfg["verify"].get("min_actual_saving"), 0.05)
     saving = 1.0 - new_size / orig_size
     if saving < min_saving:
-        return False, f"实际只省了 {saving:.1%}，低于要求的 {min_saving:.0%}，丢弃产物"
+        return False, (f"实际只省了 {saving:.1%}（{fmt_size(orig_size)} -> "
+                       f"{fmt_size(new_size)}），低于要求的 {min_saving:.0%}，"
+                       f"丢弃产物")
     return True, ""
 
 
