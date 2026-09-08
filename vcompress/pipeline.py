@@ -15,7 +15,7 @@ from .caps import Caps
 from .logfmt import em
 from .progress import ProgressPrinter
 from .results import ResultStore
-from .util import fmt_size, to_float
+from .util import fmt_hms, fmt_size, to_float
 
 log = logging.getLogger("vcompress")
 
@@ -288,7 +288,7 @@ def _commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
     log.info(
         f"[完成] {em(src.name)}：crf={encode.fmt_crf(crf)}，省下 "
         f"{em(f'{saving:.1%}')}（{fmt_size(info.size)} -> "
-        f"{em(fmt_size(new_size))}，用了 {elapsed:.0f}s{kept}）"
+        f"{em(fmt_size(new_size))}，用了 {fmt_hms(elapsed)}{kept}）"
     )
     ctx.store.add("ok", info, output=str(final), crf=crf, new_size=new_size,
                   saving=round(saving, 4), seconds=round(elapsed, 1),
