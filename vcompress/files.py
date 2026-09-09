@@ -61,8 +61,17 @@ def output_name(src: Path, encoder: str, out_ext: str) -> Path:
 
     带上编码器后缀，同名不同容器的源（a.mp4、a.avi）压缩后不会撞名，
     目录里也能一眼看出哪些是压过的、拿什么压的。
+
+    源名自己已经带着同一个编码器后缀时（a.av1.mkv——重封装模式的主要
+    处理对象就是本工具自己的产物）先摘掉再补，否则会叠出 a.av1.av1.mkv。
+    摘完与源路径同名时由 resolve_final_path 处置：keep 模式退让到 -2，
+    删除原文件模式原地替换。
     """
-    return src.with_name(f"{src.stem}.{encoder}{out_ext}")
+    stem = src.stem
+    suffix = f".{encoder}"
+    if stem.lower().endswith(suffix.lower()):
+        stem = stem[: -len(suffix)]
+    return src.with_name(f"{stem}.{encoder}{out_ext}")
 
 
 def _stat_key(f: Path, attr: str, descending: bool):

@@ -40,22 +40,27 @@ def fmt_crf(crf) -> str:
     return str(int(crf)) if float(crf).is_integer() else f"{float(crf):g}"
 
 
-def with_svtav1_param(extra: str, key: str, value: str) -> str:
-    """往 -svtav1-params 里塞一个键，没有这个开关就补一个。
+def merge_dict_param(extra: str, option: str, key: str, value: str) -> str:
+    """往 `-svtav1-params` / `-x265-params` 这类字典型选项里塞一个键。
 
-    不能简单在命令行上再加一个 `-svtav1-params`：它是一个字典型选项，第二个
-    会把第一个整个顶掉，`extra` 里那一串调优参数就全丢了。
+    不能简单在命令行上再加一个同名选项：第二个会把第一个整个顶掉，
+    `extra` 里那一串调优参数就全丢了。同键的旧值被替换，其余参数原样保留。
     """
     tokens = shlex.split(extra or "")
     setting = f"{key}={value}"
-    if "-svtav1-params" in tokens:
-        i = tokens.index("-svtav1-params") + 1
+    if option in tokens:
+        i = tokens.index(option) + 1
         if i < len(tokens):
             kept = [p for p in tokens[i].split(":")
                     if p and not p.startswith(f"{key}=")]
             tokens[i] = ":".join(kept + [setting])
             return shlex.join(tokens)
-    return shlex.join(tokens + ["-svtav1-params", setting])
+    return shlex.join(tokens + [option, setting])
+
+
+def with_svtav1_param(extra: str, key: str, value: str) -> str:
+    """往 -svtav1-params 里塞一个键，没有这个开关就补一个。"""
+    return merge_dict_param(extra, "-svtav1-params", key, value)
 
 
 def crf_args(encoder_cfg: dict, crf) -> tuple:
@@ -129,10 +134,12 @@ def color_args(info) -> list:
     return args
 
 
-def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
-              crf: float, a_args: list, s_args: list, marker: str,
-              original_comment: str = "", c_args: list = None) -> list:
-    container = dst.suffix.lower()
+def container_maps_and_tail(container: str) -> tuple:
+    """按目标容器决定流映射与收尾参数，返回 (maps, tail)。
+
+    编码和流复制两条命令共用这一份：两边各写一遍，哪天改了 mkv 的附件映射
+    就会漏掉另一边。
+    """
     maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
     tail = []
     if container in MKV_LIKE:
@@ -145,6 +152,14 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         tail += ["-c:d", "copy"]
     if container in MP4_LIKE:
         tail += ["-movflags", "+use_metadata_tags"]
+    return maps, tail
+
+
+def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
+              crf: float, a_args: list, s_args: list, marker: str,
+              original_comment: str = "", c_args: list = None) -> list:
+    container = dst.suffix.lower()
+    maps, tail = container_maps_and_tail(container)
     return [
         ffmpeg, "-hide_banner", "-y",
         "-i", str(src),
@@ -154,6 +169,31 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         *video_args(encoder_cfg, crf),
         *(c_args or []),
         *a_args,
+        *s_args,
+        *tail,
+        "-metadata", f"comment={merge_comment(original_comment, marker)}",
+        "-progress", "pipe:1", "-nostats",
+        str(dst),
+    ]
+
+
+def build_copy_cmd(ffmpeg: str, src: Path, dst: Path, s_args: list,
+                   marker: str, original_comment: str = "") -> list:
+    """流复制重封装：视频音频逐字节照搬，只换容器（和它自带的索引）。
+
+    给重封装模式用。没有 -c:v/-crf：画面的字节一个都不动，所以也不需要
+    色彩参数——元数据随 -map_metadata 0 原样带过去。
+    """
+    container = dst.suffix.lower()
+    maps, tail = container_maps_and_tail(container)
+    return [
+        ffmpeg, "-hide_banner", "-y",
+        "-i", str(src),
+        *maps,
+        "-map_metadata", "0",
+        "-map_chapters", "0",
+        "-c:v", "copy",
+        "-c:a", "copy",
         *s_args,
         *tail,
         "-metadata", f"comment={merge_comment(original_comment, marker)}",

@@ -63,7 +63,7 @@ def setup_logging(log_file: Path, max_bytes: int = 5_242_880,
 
 
 def preflight(caps: Caps, cfg: dict, encoder: str,
-              adaptive: bool) -> bool:
+              adaptive: bool, remux: bool = False) -> bool:
     """先确认这个 ffmpeg 构建能干活，别等编码到一半才报错。"""
     codec = cfg["encode"][encoder]["codec"]
     if not caps.known:
@@ -85,6 +85,11 @@ def preflight(caps: Caps, cfg: dict, encoder: str,
         elif caps.lossless_codec != "libx264":
             log.warning(f"这个 ffmpeg 构建里没有 libx264，抽样改用 "
                         f"{caps.lossless_codec}（临时文件更大）")
+    if remux and codec not in ("libsvtav1", "libx265"):
+        # bound_keyint_cfg 只认得出这两个编码器的参数串；别的编码器改不了
+        # keyint，关键帧间隔的承诺就落空了
+        log.warning(f"重封装模式没法收紧 {codec} 的关键帧间隔"
+                    f"（不认识它的参数格式），产物 GOP 保持编码器默认")
     return True
 
 
@@ -119,6 +124,11 @@ def build_parser() -> argparse.ArgumentParser:
                          "[encode.<名字>] 配置节")
     ap.add_argument("--no-adaptive", dest="adaptive", action="store_false",
                     help="关闭自适应 CRF 搜索，直接用固定 CRF")
+    ap.add_argument("--remux", action="store_true",
+                    help="重封装模式：修「检测不用再压、但快进卡顿」的文件。"
+                         "关键帧间隔超过 [remux] max_keyframe_gap_s 的重编码"
+                         "视频轨（画质按更严的 target_vmaf 控制、体积允许小涨），"
+                         "老容器流复制换新，其余照常压缩但同样收紧关键帧间隔")
     ap.add_argument("--recycle", action="store_true",
                     help="删除原文件时进回收站")
     keep = ap.add_mutually_exclusive_group()
@@ -162,16 +172,18 @@ def _load_config(arg_value):
     return cfg, path, base
 
 
-def _pick_todo(files_found, store: ResultStore, force: bool) -> tuple:
+def _pick_todo(files_found, store: ResultStore, force: bool,
+               mode: str = "compress") -> tuple:
     """过滤出真正要处理的文件，返回 (todo, 命中缓存的数)。
 
     命中缓存的文件同样算「本次跳过」——它们在汇总里计数，只是不重新处理、
-    也不往 results.jsonl 里追加记录。
+    也不往 results.jsonl 里追加记录。缓存按模式区分：上次压缩过的文件，
+    重封装模式要重新查（修 GOP）；反过来也一样。
     """
     todo = []
     cached = 0
     for f in files_found:
-        rec = None if force else store.is_cached(f)
+        rec = None if force else store.is_cached(f, mode)
         if rec:
             cached += 1
             log.info(f"[缓存] {em(f.name)}：{results.cached_reason(rec)}，"
@@ -205,9 +217,11 @@ def _run_parallel(ctx: RunContext, todo, workers: int) -> None:
     ex.shutdown(wait=True)
 
 
-def _report(stats: RunStats, store: ResultStore, elapsed: float = 0.0) -> None:
+def _report(stats: RunStats, store: ResultStore, elapsed: float = 0.0,
+            remux: bool = False) -> None:
     counts = stats.counts
-    parts = [f"压缩 {em(counts['ok'])} 个", f"跳过 {counts['skipped']} 个",
+    verb = "重封装" if remux else "压缩"
+    parts = [f"{verb} {em(counts['ok'])} 个", f"跳过 {counts['skipped']} 个",
              f"失败 {em(counts['failed']) if counts['failed'] else 0} 个"]
     if counts["dryrun"]:
         parts.append(f"预览 {counts['dryrun']} 个")
@@ -228,11 +242,18 @@ def _report(stats: RunStats, store: ResultStore, elapsed: float = 0.0) -> None:
 
 def _log_settings(cfg: dict, encoder: str, adaptive: bool, keep: bool,
                   recycle: bool, workers: int, sort: str, dry_run: bool,
-                  output_dir=None) -> None:
+                  output_dir=None, remux: bool = False) -> None:
     """开跑之前把这次的关键设置摆在控制台上，省得回头猜是按什么档压的。"""
     enc_cfg = cfg["encode"][encoder]
     bits = [f"编码器 {em(encoder)}（{enc_cfg['codec']} "
             f"preset {enc_cfg['preset']}）"]
+    if remux:
+        rcfg = cfg["remux"]
+        growth_pct = f"{int(rcfg['max_growth_ratio'] * 100)}%"
+        bits.append(f"重封装模式：关键帧间隔上限 "
+                    f"{em(str(rcfg['max_keyframe_gap_s']))}s，画质闸门 "
+                    f"VMAF {em(rcfg['target_vmaf'])}，允许体积上浮 "
+                    f"{em(growth_pct)}")
     if adaptive and bool(cfg["adaptive"].get("enabled", True)):
         bits.append(f"自适应 CRF，目标 VMAF {em(cfg['adaptive']['target_vmaf'])}")
     else:
@@ -303,7 +324,7 @@ def main(argv=None) -> int:
     log.debug(f"ffmpeg：{tools.ffmpeg}")
 
     caps = Caps.probe(tools.ffmpeg)
-    if not preflight(caps, cfg, encoder, args.adaptive):
+    if not preflight(caps, cfg, encoder, args.adaptive, args.remux):
         return EXIT_FAILED
 
     sort_order = args.sort or run_cfg["sort"]
@@ -329,10 +350,11 @@ def main(argv=None) -> int:
         keep = not bool(run_cfg["delete_original"])
     recycle = args.recycle or bool(run_cfg["use_recycle_bin"])
     _log_settings(cfg, encoder, args.adaptive, keep, recycle, workers,
-                  sort_order, args.dry_run, output_dir)
+                  sort_order, args.dry_run, output_dir, args.remux)
 
     store = ResultStore(config.resolve_run_path(cfg_dir, run_cfg["results_file"]))
-    todo, cached_skipped = _pick_todo(found, store, args.force)
+    mode = "remux" if args.remux else "compress"
+    todo, cached_skipped = _pick_todo(found, store, args.force, mode)
     if cached_skipped and todo:
         log.info(f"待处理 {em(len(todo))} 个文件"
                  f"（{cached_skipped} 个命中缓存跳过，"
@@ -357,6 +379,7 @@ def main(argv=None) -> int:
         keep=keep,
         show_progress=serial and not args.dry_run,
         output_dir=output_dir,
+        remux=args.remux,
     )
     # 缓存命中的文件不进处理流程，但同样算「本次跳过」：汇总对得上
     for _ in range(cached_skipped):
@@ -377,11 +400,11 @@ def main(argv=None) -> int:
     except KeyboardInterrupt:
         proc.terminate_all()
         log.warning("已中断：半成品临时文件已清理，原文件未受影响")
-        _report(ctx.stats, store, time.monotonic() - started)
+        _report(ctx.stats, store, time.monotonic() - started, args.remux)
         log.info("因为是中断退出，不执行自动关机")
         return EXIT_INTERRUPTED
 
-    _report(ctx.stats, store, time.monotonic() - started)
+    _report(ctx.stats, store, time.monotonic() - started, args.remux)
     if not ctx.dry_run:
         power.maybe_shutdown(cfg_path, int(run_cfg["shutdown_delay_seconds"]))
     return EXIT_FAILED if ctx.stats.counts["failed"] else EXIT_OK

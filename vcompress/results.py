@@ -46,6 +46,9 @@ def cached_reason(rec: dict) -> str:
     if rec.get("action") == "failed":
         return (f"上次失败在「{rec.get('error') or '未记原因'}」，"
                 f"片源和配置没变，重跑还是同样结论")
+    if rec.get("mode") == "remux":
+        label = "已重封装" if rec.get("action") == "ok" else "重封装时已跳过"
+        return f"上次的结果是{label}"
     return f"上次的结果是{action_label(rec.get('action', ''))}"
 
 
@@ -130,7 +133,7 @@ class ResultStore:
             if rec["path"]:
                 self.history[rec["path"]] = rec
 
-    def is_cached(self, path: Path):
+    def is_cached(self, path: Path, mode: str = "compress"):
         """上次已经处理过、并且文件确实没变过时返回那条记录，否则 None。
 
         只按路径判断是不够的：同名文件被换成另一个片源（下载了更好的版本）时
@@ -138,12 +141,18 @@ class ResultStore:
 
         失败的记录一般不算「处理过」——那多半是环境问题，下次该重试；只有
         is_permanent_failure() 认定重跑无用的那种才算（见那个函数）。
+
+        记录还区分模式：上次压缩过的文件，重封装模式照样要查（修 GOP）；
+        上次重封装过的，压缩模式靠元数据标记跳过。模式对不上就不算缓存命中，
+        老记录（没有 mode 字段）视为压缩模式。
         """
         rec = self.last(path)
         if not rec:
             return None
         if rec.get("action") not in CACHED_ACTIONS \
                 and not is_permanent_failure(rec):
+            return None
+        if rec.get("mode", "compress") != mode:
             return None
         expected = self._expected_sizes(rec, path)
         if not expected:

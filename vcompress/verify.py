@@ -170,6 +170,23 @@ def check_size(orig_size: int, new_size: int, cfg):
     return True, ""
 
 
+def check_growth(orig_size: int, new_size: int, max_ratio: float):
+    """重封装版的体积闸门：不要求变小，只要求别超过增长上限。
+
+    压缩的承诺是省体积，重封装的承诺是「最多只大一点点」——多出来的关键帧
+    就是修快进的体积代价。失败结论同样只取决于片源和配置（关键帧的开销是
+    编码器算出来的定数），配 PermanentVerifyError。
+    """
+    limit = int(orig_size * (1.0 + max(0.0, max_ratio)))
+    if new_size > limit:
+        return False, (
+            f"产物比允许的上限还大：{fmt_size(orig_size)} -> "
+            f"{fmt_size(new_size)}（上限 {fmt_size(limit)}，"
+            f"多了 {new_size / max(1, orig_size) - 1:.1%}）"
+        )
+    return True, ""
+
+
 COLOR_FIELDS = (
     ("color_primaries", "primaries"),
     ("color_transfer", "transfer"),
@@ -316,7 +333,7 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
 
 def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             log=None, lossless_codec: str = "libx264",
-            vmaf_available: bool = True):
+            vmaf_available: bool = True, max_growth_ratio: float = 0.0):
     """跑完整校验链，任何硬失败抛 VerifyError；返回 (VMAF 均值, 最低段)。
 
     两个值都可能为 None（这个构建量不了 VMAF 时）。顺序是按代价排的，越便宜的
@@ -336,12 +353,18 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     调用方据此让它下次直接跳过，而不是再烧几小时得到同一个答案。
 
     `vmaf_available` 是构建能力（caps 里有没有 libvmaf 滤镜），由调用方给。
+    `max_growth_ratio` > 0 时体积闸门换成重封装口径：不要求变小，只要求
+    增长不超过这个比例（见 check_growth）。
     """
     ok, msg = check_basic(orig_info, out_info, cfg)
     if not ok:
         raise VerifyError(msg)
 
-    ok, msg = check_size(orig_info.size, out.stat().st_size, cfg)
+    if max_growth_ratio > 0:
+        ok, msg = check_growth(orig_info.size, out.stat().st_size,
+                               max_growth_ratio)
+    else:
+        ok, msg = check_size(orig_info.size, out.stat().st_size, cfg)
     if not ok:
         raise PermanentVerifyError(msg)
 

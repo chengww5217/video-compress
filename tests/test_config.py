@@ -206,6 +206,14 @@ class ValidationTests(unittest.TestCase):
         self.assert_rejected({"adaptive": {"target_margin": 2.0}},
                              "target_margin")
 
+    def test_remux_section_is_validated(self):
+        self.assert_rejected({"remux": {"max_keyframe_gap_s": 0}},
+                             "max_keyframe_gap_s", "正数")
+        self.assert_rejected({"remux": {"target_vmaf": 120.0}},
+                             "target_vmaf")
+        self.assert_rejected({"remux": {"max_growth_ratio": 1.5}},
+                             "max_growth_ratio", "0 和 1 之间")
+
     def test_all_problems_are_reported_at_once(self):
         msg = self.assert_rejected(
             {"run": {"workers": "many"}, "skip": {"typo": 1}})

@@ -22,6 +22,7 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(args.recursive)
         self.assertTrue(args.adaptive)
         self.assertFalse(args.dry_run)
+        self.assertFalse(args.remux)
         self.assertIsNone(args.encoder)
         self.assertIsNone(args.config)
         self.assertIsNone(args.sort)
@@ -30,7 +31,7 @@ class ParserTests(unittest.TestCase):
         args = cli.build_parser().parse_args(
             ["a.mp4", "b.mkv", "--dry-run", "--no-recursive", "--no-adaptive",
              "--keep", "--recycle", "--force", "--workers", "3",
-             "--sort", "size-desc",
+             "--sort", "size-desc", "--remux",
              "--encoder", "x265", "-o", "/tmp/out"])
         self.assertEqual(args.paths, ["a.mp4", "b.mkv"])
         self.assertFalse(args.recursive)
@@ -39,6 +40,7 @@ class ParserTests(unittest.TestCase):
         self.assertTrue(args.keep)
         self.assertTrue(args.recycle)
         self.assertTrue(args.force)
+        self.assertTrue(args.remux)
         self.assertEqual(args.workers, 3)
         self.assertEqual(args.sort, "size-desc")
         self.assertEqual(args.encoder, "x265")
@@ -105,6 +107,24 @@ class PreflightTests(unittest.TestCase):
         ok, _ = self.run_preflight(set(), set())
         self.assertTrue(ok)
         self.assertIn("跳过构建自检", self.messages())
+
+    def test_remux_with_unbindable_codec_warns(self):
+        """keyint 只认得出 svtav1/x265 的参数串，别的编码器要提前打招呼。"""
+        self.cfg["encode"]["custom"] = dict(self.cfg["encode"]["av1"],
+                                            codec="libaom-av1")
+        built = caps.Caps(encoders=frozenset({"libaom-av1", "libx264"}),
+                          filters=frozenset({"libvmaf"}))
+        ok = cli.preflight(built, self.cfg, "custom", True, remux=True)
+        self.assertTrue(ok)
+        self.assertIn("关键帧间隔", self.messages())
+
+    def test_remux_with_known_codec_stays_quiet(self):
+        built = caps.Caps(
+            encoders=frozenset({"libsvtav1", "libx264", "libopus"}),
+            filters=frozenset({"libvmaf"}))
+        ok = cli.preflight(built, self.cfg, "av1", True, remux=True)
+        self.assertTrue(ok)
+        self.assertEqual(self.logs, [])
 
 
 class _CaptureHandler(logging.Handler):

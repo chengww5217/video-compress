@@ -37,6 +37,21 @@ class OutputNameTests(unittest.TestCase):
         self.assertEqual(output_name(Path("/v/a.mp4"), "x265", ".mkv"),
                          Path("/v/a.x265.mkv"))
 
+    def test_existing_encoder_suffix_is_not_doubled(self):
+        """重封装模式常处理本工具自己的产物：a.av1.mkv 不能叠成 a.av1.av1.mkv。"""
+        self.assertEqual(output_name(Path("/v/a.av1.mkv"), "av1", ".mkv"),
+                         Path("/v/a.av1.mkv"))
+
+    def test_suffix_of_a_different_encoder_is_kept(self):
+        self.assertEqual(output_name(Path("/v/a.x265.mkv"), "av1", ".mkv"),
+                         Path("/v/a.x265.av1.mkv"))
+
+    def test_remux_pseudo_encoder_gets_the_same_treatment(self):
+        self.assertEqual(output_name(Path("/v/a.mp4"), "remux", ".mkv"),
+                         Path("/v/a.remux.mkv"))
+        self.assertEqual(output_name(Path("/v/a.remux.mkv"), "remux", ".mkv"),
+                         Path("/v/a.remux.mkv"))
+
 
 class TmpNamingTests(unittest.TestCase):
     """临时文件名必须带上源文件的完整名字，否则同 stem 的源会互相覆盖。"""

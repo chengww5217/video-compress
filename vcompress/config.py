@@ -81,6 +81,16 @@ DEFAULTS = {
         # 无损轨怎么处理："flac" 保持数学无损，"opus" 体积更小但不可逆
         "lossless": "flac",
     },
+    "remux": {
+        # 重封装模式（--remux）：修「检测不用再压、但快进卡顿」的文件。
+        # 卡顿主因是关键帧间隔（GOP）太长——播放器 seek 要从上一个关键帧
+        # 逐帧解到目标位置；其次是 avi/flv/wmv/mpg 这类没有可靠索引的容器
+        "max_keyframe_gap_s": 5.0,
+        # GOP 重编的画质闸门：比压缩的 95 更严——二次编码的代际损失要留余量
+        "target_vmaf": 98.0,
+        # 允许体积最多增长多少：关键帧不免费，多出来的就是修快进的代价
+        "max_growth_ratio": 0.10,
+    },
     "verify": {
         "decode_check": True,
         "max_duration_diff_s": 0.5,
@@ -138,6 +148,7 @@ FREEFORM_TABLES = {("skip", "bpp"), ("skip", "expected_ratio")}
 RATIO_KEYS = {
     ("skip", "min_saving_ratio"),
     ("verify", "min_actual_saving"),
+    ("remux", "max_growth_ratio"),
 }
 
 
@@ -283,6 +294,13 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[verify] vmaf_sample_seconds 必须是正数")
     if float(vf["max_duration_diff_s"]) < 0:
         errors.append("[verify] max_duration_diff_s 不能是负数")
+
+    rm = cfg["remux"]
+    if float(rm["max_keyframe_gap_s"]) <= 0:
+        errors.append("[remux] max_keyframe_gap_s 必须是正数（秒）")
+    if not 0 < float(rm["target_vmaf"]) <= 100:
+        errors.append("[remux] target_vmaf 必须在 (0, 100] 之间"
+                      "（重封装是二次编码，画质闸门不该比压缩模式松）")
 
     if int(cfg["run"]["workers"]) < 1:
         errors.append("[run] workers 至少是 1")
