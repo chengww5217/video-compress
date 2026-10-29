@@ -5,12 +5,19 @@
 """
 
 import re
+import signal
 import subprocess
 import threading
 
 _active_procs = set()
 _lock = threading.Lock()
 _cancelled = threading.Event()
+
+# 子进程自己收到 Ctrl+C 时的退出码。终端的 Ctrl+C 发给整个前台进程组，
+# 子进程和主线程同时收到：子进程可能先死，那时主线程还没来得及
+# terminate_all 置上取消标志，只看标志会漏掉。
+# POSIX 上是「被 SIGINT 杀死」（-2）；Windows 上是 STATUS_CONTROL_C_EXIT。
+_INTERRUPT_CODES = {-signal.SIGINT, 0xC000013A}
 
 
 class Cancelled(KeyboardInterrupt):
@@ -80,6 +87,12 @@ def run_managed(cmd: list, cwd=None) -> tuple:
     """跑一个短命子进程，注册后可被 terminate_all 立刻杀掉。
 
     返回 (returncode, stdout, stderr)。中断时先 kill 再收尸，不留僵尸进程。
+
+    子进程是因为中断才死的（被 terminate_all 杀掉，或自己收到了 Ctrl+C），
+    就抛 Cancelled 而不是返回非零退出码。调用方的写法几乎都是「rc != 0 就
+    抛 RuntimeError」，再被上层某个 `except Exception` 当成这个文件的结论：
+    实际踩过的坑是并发重封装时 Ctrl+C 打断了扫关键帧的 ffprobe，两个文件
+    被记成「[跳过] 扫关键帧失败」写进 results.jsonl，下次运行直接命中缓存。
     """
     proc = spawn(cmd, cwd=cwd)
     try:
@@ -93,7 +106,10 @@ def run_managed(cmd: list, cwd=None) -> tuple:
         raise
     finally:
         unregister(proc)
-    return proc.returncode, out, err
+    rc = proc.returncode
+    if rc != 0 and (rc in _INTERRUPT_CODES or _cancelled.is_set()):
+        raise Cancelled("子进程被中断")
+    return rc, out, err
 
 
 # ----------------------------------------------------------------- 错误信息提取
