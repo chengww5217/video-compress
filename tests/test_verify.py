@@ -287,6 +287,84 @@ class AddedDecodeErrorTests(unittest.TestCase):
         ]
         self.assertEqual(self.added(), [])
 
+    def test_audio_ts_rounding_alone_passes_without_a_baseline(self):
+        """真实案例：拼接过的 mp4 接缝处有只占 1 个采样的 AAC 包，copy 进 mkv
+        后挤到同一毫秒，源文件解码是干净的，十几个小时的编码结果被判失败。"""
+        self.errs["a.tmp.mkv"] = NULL_DTS_LINES
+        self.assertEqual(self.added(), [])
+        self.assertEqual(self.calls, ["a.tmp.mkv"],
+                         "只剩取整噪音时不该再解一遍源文件")
+
+    def test_real_errors_next_to_ts_rounding_still_fail(self):
+        self.errs["a.tmp.mkv"] = NULL_DTS_LINES + [
+            "[av1 @ 0xaaa] Bad frame",
+        ]
+        added = self.added()
+        self.assertEqual(len(added), 1)
+        self.assertIn("Bad frame", added[0])
+
+
+# 前三条取自真实产物的解码输出，第四条是同一片源复现出来的（4 处拼接点，
+# 分别倒退 0/16/24/8 个采样）
+NULL_DTS_LINES = [
+    "[null @ 0x5f1] Application provided invalid, non monotonically "
+    "increasing dts to muxer in stream 1: 192890448 >= 192890448",
+    "[null @ 0x5f1] Application provided invalid, non monotonically "
+    "increasing dts to muxer in stream 1: 199134256 >= 199134240",
+    "[null @ 0x5f1] Application provided invalid, non monotonically "
+    "increasing dts to muxer in stream 1: 214656936 >= 214656912",
+    "    Last message repeated 3 times",
+    "[null @ 0x5f1] Application provided invalid, non monotonically "
+    "increasing dts to muxer in stream 1: 230657720 >= 230657712",
+    "    Last message repeated 2 times",
+]
+
+
+def null_dts(stream: int, prev: int, cur: int) -> str:
+    return (f"[null @ 0x5f1] Application provided invalid, non monotonically "
+            f"increasing dts to muxer in stream {stream}: {prev} >= {cur}")
+
+
+class TsRoundingNoiseTests(unittest.TestCase):
+    """只放过音频流上毫秒取整级别的倒退，别的时间戳错乱照样留着。"""
+
+    def test_real_case_is_dropped_entirely(self):
+        kept, ignored = verify.drop_ts_rounding_noise(NULL_DTS_LINES)
+        self.assertEqual(kept, [])
+        self.assertEqual(ignored, 9, "4 行 + 重复折叠的 3 + 2 次")
+
+    def test_large_audio_backstep_is_kept(self):
+        """倒退一整帧（AAC 1024 个采样）不是取整能解释的。"""
+        line = null_dts(1, 1_000_000, 1_000_000 - 1024)
+        kept, ignored = verify.drop_ts_rounding_noise([line])
+        self.assertEqual(kept, [line])
+        self.assertEqual(ignored, 0)
+
+    def test_slack_boundary(self):
+        at = null_dts(1, 5000, 5000 - verify.AUDIO_DTS_SLACK)
+        past = null_dts(1, 5000, 5000 - verify.AUDIO_DTS_SLACK - 1)
+        kept, _ = verify.drop_ts_rounding_noise([at, past])
+        self.assertEqual(kept, [past])
+
+    def test_video_stream_is_never_dropped(self):
+        """视频流一格就是一帧，相等就是帧时间戳真错了。"""
+        line = null_dts(0, 300, 300)
+        kept, _ = verify.drop_ts_rounding_noise([line])
+        self.assertEqual(kept, [line])
+
+    def test_repeat_line_stays_with_a_kept_message(self):
+        lines = [
+            "[av1 @ 0x1] Bad frame",
+            "    Last message repeated 2 times",
+        ]
+        kept, ignored = verify.drop_ts_rounding_noise(lines)
+        self.assertEqual(kept, lines)
+        self.assertEqual(ignored, 0)
+        self.assertEqual(list(count_decode_errors(kept).values()), [3])
+
+    def test_none_is_empty(self):
+        self.assertEqual(verify.drop_ts_rounding_noise(None), ([], 0))
+
 
 class RunAllTests(unittest.TestCase):
     """校验链的编排：按代价从便宜到贵，环境缺能力只告警，画质不过才算失败。"""

@@ -24,6 +24,18 @@ _ADDR_RE = re.compile(r"@ 0x[0-9a-fA-F]+")
 _STREAM_RE = re.compile(r"#\d+:\d+")
 _REPEAT_RE = re.compile(r"Last message repeated (\d+) times?")
 
+# null muxer 对时间戳顺序的抱怨，见 drop_ts_rounding_noise()
+_NULL_DTS_RE = re.compile(
+    r"\[null @ [^\]]*\] Application provided invalid, non monotonically "
+    r"increasing dts to muxer in stream (\d+): (-?\d+) >= (-?\d+)")
+# ffmpeg 默认选流是先视频后音频、各最多一路，产物必有视频（check_basic 已保证），
+# 所以 null 输出里音频固定是 1 号流
+NULL_AUDIO_STREAM = 1
+# 音频流的时间基是 1/采样率。毫秒取整最多让时间戳倒退半毫秒（48 kHz 下 24 个
+# 采样，192 kHz 下 96 个），这里放宽到 192 kHz 的 1ms。真正的时间戳错乱至少
+# 差一整帧（AAC 1024、MP3 1152 个采样），离这个量远得很。
+AUDIO_DTS_SLACK = 192
+
 
 class VerifyError(RuntimeError):
     """产物没通过校验；调用方据此丢弃产物并保留原文件。"""
@@ -82,6 +94,49 @@ def count_decode_errors(lines) -> Counter:
     return counts
 
 
+def _is_ts_rounding_noise(line: str) -> bool:
+    m = _NULL_DTS_RE.search(line)
+    if not m or int(m.group(1)) != NULL_AUDIO_STREAM:
+        return False
+    return 0 <= int(m.group(2)) - int(m.group(3)) <= AUDIO_DTS_SLACK
+
+
+def drop_ts_rounding_noise(lines):
+    """去掉音频时间戳取整引起的 null muxer 报错，返回 (剩下的行, 去掉了几处)。
+
+    mkv 的时间戳只精确到毫秒。片源里间隔不到 1ms 的音频包（拼接过的 mp4 在
+    接缝处常有只占 1 个采样的 AAC 包）copy 进 mkv 后会挤到同一个毫秒上，解码时
+    ffmpeg 按采样重建时间戳，得到相等或倒退几个采样的值。`-f null` 要求 dts
+    严格递增，于是用 error 级别报 "non monotonically increasing dts"。音频本身
+    解码正常，源文件在 1/采样率 的时间基下也不会报，基线比对兜不住，只能在这里
+    认出来。
+
+    只放过音频流上倒退不超过 AUDIO_DTS_SLACK 的：视频流的时间基是一帧一格，
+    相等就意味着帧时间戳真错了；倒退一整帧以上的音频也照样算问题。跟在被去掉的
+    行后面的 "Last message repeated" 一并去掉。
+    """
+    kept = []
+    ignored = 0
+    dropping = False
+    for raw in lines or ():
+        line = raw.strip()
+        if not line:
+            continue
+        m = _REPEAT_RE.search(line)
+        if m:
+            if dropping:
+                ignored += int(m.group(1))
+            else:
+                kept.append(raw)
+            continue
+        dropping = _is_ts_rounding_noise(line)
+        if dropping:
+            ignored += 1
+        else:
+            kept.append(raw)
+    return kept, ignored
+
+
 def added_decode_errors(ffmpeg: str, out: Path, src: Path, log=None):
     """产物比源文件多出来的解码错误；产物没引入新问题时返回空列表。
 
@@ -93,9 +148,14 @@ def added_decode_errors(ffmpeg: str, out: Path, src: Path, log=None):
     比对是单向的：源文件全流解码会多出一些产物不可能有的噪音（容器层的 dts
     告警、旧编码器的 flag 修正），那些不该影响判断。
 
-    基线是惰性的：产物解码干净就根本不碰源文件，正常流程零开销。
+    基线是惰性的：产物解码干净就根本不碰源文件，正常流程零开销。音频时间戳的
+    毫秒取整噪音在比对前就去掉（见 drop_ts_rounding_noise()），只剩它们时同样
+    不碰源文件。
     """
-    out_errs = decode_errors(ffmpeg, out)
+    out_errs, ignored = drop_ts_rounding_noise(decode_errors(ffmpeg, out))
+    if ignored and log:
+        log.info(f"[校验] {em(src.name)}：忽略 {ignored} 处音频时间戳取整告警"
+                 f"（片源里间隔不到 1ms 的音频包进 mkv 后挤到了同一毫秒）")
     if not out_errs:
         return []
     out_counts = count_decode_errors(out_errs)
