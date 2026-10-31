@@ -106,54 +106,6 @@ class KeyintTests(unittest.TestCase):
         self.assertEqual(remux.bound_keyint_cfg(cfg, 25.0, 5.0), cfg)
 
 
-class PlanTests(unittest.TestCase):
-    """决策树：GOP 超限重编、老容器换封、都没问题不动。"""
-
-    def setUp(self):
-        self.cfg = make_cfg()
-
-    def plan(self, max_gap, **kw):
-        return remux.plan_remux(make_info(**kw), self.cfg, max_gap)
-
-    def test_long_gap_needs_reencode(self):
-        plan = self.plan(300.0)
-        self.assertEqual(plan.strategy, remux.GOP)
-        self.assertEqual(plan.keyint, 150)  # 30fps × 5s
-        self.assertIn("300", plan.reason)
-
-    def test_fine_gap_and_modern_container_is_left_alone(self):
-        plan = self.plan(2.0)
-        self.assertEqual(plan.strategy, "")
-        self.assertIn("没有问题", plan.reason)
-
-    def test_legacy_container_gets_stream_copy(self):
-        plan = self.plan(2.0, container=".avi")
-        self.assertEqual(plan.strategy, remux.COPY)
-
-    def test_interlaced_sources_never_get_reencoded(self):
-        plan = self.plan(300.0, field_order="tt")
-        self.assertEqual(plan.strategy, "")
-        self.assertIn("交错", plan.reason)
-
-    def test_copy_requires_a_different_container(self):
-        self.cfg["encode"]["output_container"] = ".avi"
-        plan = self.plan(2.0, container=".avi")
-        self.assertEqual(plan.strategy, "")
-
-    def test_copy_requires_a_compatible_target(self):
-        # flv1 装不进 mp4，流复制会整个失败
-        self.cfg["encode"]["output_container"] = ".mp4"
-        plan = self.plan(2.0, container=".flv", video_codec="flv1",
-                         codec_family="flv1")
-        self.assertEqual(plan.strategy, "")
-        self.assertIn("装不进", plan.reason)
-
-    def test_mkv_takes_anything(self):
-        self.cfg["encode"]["output_container"] = ".mkv"
-        plan = self.plan(2.0, container=".wmv", video_codec="wmv3")
-        self.assertEqual(plan.strategy, remux.COPY)
-
-
 class PredictedSizeTests(unittest.TestCase):
     def test_video_plus_copied_audio(self):
         info = make_info(duration=100.0, audio_bitrates=[128_000])
@@ -193,28 +145,6 @@ class CheckGrowthTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("上限", msg)
         self.assertIn("20.0%", msg)
-
-
-class CopyCmdTests(unittest.TestCase):
-    def test_copy_cmd_keeps_bytes_and_adds_the_marker(self):
-        src = Path("/v/a.avi")
-        dst = Path("/v/a.remux.mkv")
-        cmd = encode.build_copy_cmd("ffmpeg", src, dst,
-                                    ["-c:s:0", "srt"], "vcompress-remux-v1",
-                                    "ripped by someone")
-        joined = " ".join(cmd)
-        self.assertIn("-c:v copy", joined)
-        self.assertIn("-c:a copy", joined)
-        self.assertIn("-map_metadata 0", joined)
-        self.assertIn("-map_chapters 0", joined)
-        # mkv 系要带上附件映射，mp4 系的时间码这类 data 流要丢掉
-        self.assertIn("-map 0:t?", joined)
-        self.assertIn("-dn", joined)
-        self.assertIn("ripped by someone | vcompress-remux-v1", joined)
-        self.assertIn("-progress pipe:1", joined,
-                      "流复制也要走 run_encode 的进度解析")
-        self.assertEqual(cmd[-1], str(dst))
-        self.assertNotIn("-crf", joined)
 
 
 class MergeDictParamTests(unittest.TestCase):
@@ -293,8 +223,10 @@ class RemuxPipelineTestCase(unittest.TestCase):
         run_all = (mock.Mock(return_value=(98.6, 98.1)) if verify_ok
                    else mock.Mock(side_effect=verify.VerifyError("vmaf 40")))
         stamps_out = stamps_out if stamps_out is not None else stamps_src
+        self.scanned = []
 
         def stamps(tools, path):
+            self.scanned.append(Path(path))
             return stamps_src if Path(path) == self.src else stamps_out
 
         patches = [
@@ -361,34 +293,38 @@ class RemuxEntryTests(RemuxPipelineTestCase):
         ctx = self.ctx(dry_run=True)
         with mock.patch.object(pipeline.probe, "probe",
                                return_value=self.info), \
-                mock.patch.object(pipeline.remux, "keyframe_timestamps",
-                                  return_value=[0.0, 300.0]):
+                mock.patch.object(pipeline.remux,
+                                  "keyframe_timestamps") as scan:
             outcome = pipeline.process_file(ctx, self.src)
         self.assertEqual(outcome, pipeline.DRYRUN)
+        scan.assert_not_called()
         self.assertEqual([p.name for p in self.root.iterdir()], ["a.mkv"])
         self.assertIsNone(self.store.last(self.src))
 
-    def test_nothing_to_fix_is_a_skip_with_a_reason(self):
-        ctx = self.ctx()
-        # 间隔要覆盖到片尾：最大间隔的计算包含最后一个关键帧到结束那一段
-        dense = [float(t) for t in range(0, 601, 5)]
-        with mock.patch.object(pipeline.probe, "probe",
-                               return_value=self.info), \
-                mock.patch.object(pipeline.remux, "keyframe_timestamps",
-                                  return_value=dense):
-            outcome = pipeline.process_file(ctx, self.src)
-        self.assertEqual(outcome, pipeline.SKIPPED)
-        self.assertIn("没有问题", self.store.last(self.src)["reason"])
+    def test_fine_gap_is_reencoded_without_scanning_the_source(self):
+        """播放机实测：间隔 4.17s 没超 5s 上限的原片照样卡，所以不体检、一律重编。"""
+        dense = [float(t) for t in range(0, 601, 4)]
+        _ctx, outcome = self.run_remux(
+            dense, dense, choice=adaptive.CrfChoice(18, 1, True, 98.3))
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertNotIn(self.src, self.scanned, "不该再扫源文件的关键帧")
+        self.assertEqual(self.scanned, [self.tmp_file()], "只复核产物")
+        rec = self.store.last(self.src)
+        self.assertEqual(rec["strategy"], "gop")
+        self.assertEqual(rec["mode"], "remux")
 
-    def test_unreadable_keyframes_is_a_skip_not_a_failure(self):
+    def test_interlaced_source_is_not_reencoded_even_when_allowed(self):
+        """skip_interlaced 关了也不重编：二次编码丢交错标记，VMAF 测不出来。"""
+        self.cfg["skip"]["skip_interlaced"] = False
+        self.info.field_order = "tt"
         ctx = self.ctx()
         with mock.patch.object(pipeline.probe, "probe",
                                return_value=self.info), \
-                mock.patch.object(pipeline.remux, "keyframe_timestamps",
-                                  side_effect=RuntimeError("ffprobe died")):
+                mock.patch.object(pipeline.encode, "run_encode") as run:
             outcome = pipeline.process_file(ctx, self.src)
         self.assertEqual(outcome, pipeline.SKIPPED)
-        self.assertIn("扫关键帧失败", self.store.last(self.src)["reason"])
+        run.assert_not_called()
+        self.assertIn("交错", self.store.last(self.src)["reason"])
 
 
 class GopRemuxTests(RemuxPipelineTestCase):
@@ -485,72 +421,6 @@ class GopRemuxTests(RemuxPipelineTestCase):
         self.assertTrue((self.root / "a.av1.mkv").exists())
 
 
-class CopyRemuxTests(RemuxPipelineTestCase):
-    def setUp(self):
-        super().setUp()
-        # 容器老旧但关键帧密度正常 → 流复制换封。片子改短，密集的关键帧
-        # 才能同时覆盖片头片尾（最大间隔的计算含这两段）
-        self.info.container = ".avi"
-        self.info.duration = 4.0
-        self.encoded = b"e" * 1010  # +1% 的容器开销
-        self.dense = [0.0, 1.0, 2.0, 3.0, 4.0]
-
-    def test_success_path_copies_streams(self):
-        seen = {}
-
-        def run_encode(cmd, duration, cb=None):
-            seen["cmd"] = cmd
-            Path(cmd[-1]).write_bytes(self.encoded)
-
-        ctx = self.ctx()
-        out_info = make_info(path=self.tmp_file(), video_codec="h264",
-                             size=len(self.encoded), duration=4.0,
-                             container=".mkv")
-        with mock.patch.object(pipeline.probe, "probe",
-                               side_effect=lambda tools, path:
-                               self.info if Path(path) == self.src
-                               else out_info), \
-                mock.patch.object(pipeline.encode, "run_encode", run_encode), \
-                mock.patch.object(pipeline.remux, "verify_copy") as vcopy, \
-                mock.patch.object(pipeline.remux, "keyframe_timestamps",
-                                  return_value=self.dense):
-            outcome = pipeline.process_file(ctx, self.src)
-        self.assertEqual(outcome, pipeline.OK)
-        joined = " ".join(seen["cmd"])
-        self.assertIn("-c:v copy", joined)
-        self.assertIn("-c:a copy", joined)
-        self.assertIn("vcompress-remux-v1", joined)
-        vcopy.assert_called_once()
-        self.assertTrue((self.root / "a.remux.mkv").exists(),
-                        "流复制产物用 .remux 后缀，不冒充编码产物")
-        rec = self.store.last(self.src)
-        self.assertEqual(rec["strategy"], "copy")
-        self.assertEqual(rec["mode"], "remux")
-
-    def test_verify_failure_discards_the_output(self):
-        def run_encode(cmd, duration, cb=None):
-            Path(cmd[-1]).write_bytes(self.encoded)
-
-        ctx = self.ctx()
-        out_info = make_info(path=self.tmp_file(), video_codec="h264",
-                             size=len(self.encoded), duration=4.0)
-        with mock.patch.object(pipeline.probe, "probe",
-                               side_effect=lambda tools, path:
-                               self.info if Path(path) == self.src
-                               else out_info), \
-                mock.patch.object(pipeline.encode, "run_encode", run_encode), \
-                mock.patch.object(pipeline.remux, "verify_copy",
-                                  side_effect=verify.VerifyError(
-                                      "时长差了 3.00s")), \
-                mock.patch.object(pipeline.remux, "keyframe_timestamps",
-                                  return_value=self.dense):
-            outcome = pipeline.process_file(ctx, self.src)
-        self.assertEqual(outcome, pipeline.FAILED)
-        self.assertTrue(self.src.exists())
-        self.assertFalse((self.root / "a.remux.mkv").exists())
-        self.assertIn("时长差了", self.store.last(self.src)["error"])
-
-
 class RemuxCacheTests(RemuxPipelineTestCase):
     def test_mode_mismatch_is_not_a_cache_hit(self):
         """上次压缩过的文件，重封装模式必须重新查（这正是它的活）。"""
@@ -567,6 +437,24 @@ class RemuxCacheTests(RemuxPipelineTestCase):
         self.store.add("ok", self.info, new_size=900)
         self.assertIsNotNone(self.store.is_cached(self.src, "compress"))
         self.assertIsNone(self.store.is_cached(self.src, "remux"))
+
+    def test_old_health_check_skips_are_no_longer_trusted(self):
+        """旧版体检放过的文件（间隔没超上限）现在要重新处理。"""
+        for reason in ("关键帧间隔与容器都没有问题",
+                       "容器 .avi 没有可靠索引，但目标容器也是它，换了也一样",
+                       "容器 .flv 没有可靠索引，但源编码器 flv1 装不进 .mp4",
+                       "扫关键帧失败：ffprobe died",
+                       "读不到任何关键帧时间戳，不敢动"):
+            self.store.add("skipped", self.info, reason=reason, mode="remux")
+            self.assertIsNone(self.store.is_cached(self.src, "remux"), reason)
+
+    def test_gate_skips_are_still_cached(self):
+        """画质/体积闸门的结论和体检无关，重跑也一样，照旧缓存。"""
+        for reason in ("连 crf=16 都只有 VMAF 90.00，达不到重封装目标 98.0",
+                       "容器开销超限"):  # 只是「容器」开头，不是旧体检原话
+            self.store.add("skipped", self.info, reason=reason, mode="remux")
+            self.assertIsNotNone(self.store.is_cached(self.src, "remux"),
+                                 reason)
 
 
 if __name__ == "__main__":

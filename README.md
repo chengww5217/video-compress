@@ -35,7 +35,7 @@ vcompress ~/videos --dry-run
 | `--delete-original` | 压缩校验通过后删除原文件（默认保留） |
 | `--keep` | 明确保留原文件（默认行为） |
 | `--encoder x265` | 换编码器（播放兼容性更好，体积略大） |
-| `--remux` | 重封装模式：修「不用再压、但快进卡顿」的文件——关键帧间隔超限的重编码收紧（画质按更严的 VMAF 98 控制、体积允许小涨），老容器流复制换新，详见[使用指南](docs/usage.md#重封装模式---remux) |
+| `--remux` | 重封装模式：「不用再压」的文件不做检测，一律按配置的编码器重编视频轨、关键帧间隔收紧到 5s 以内（画质按更严的 VMAF 98 控制、体积允许小涨，达不到就不动），详见[使用指南](docs/usage.md#重封装模式---remux) |
 | `--workers N` | 并发处理多个文件 |
 | `--sort 方式` | 处理顺序（默认按路径名）：`name-desc` 反序、`size`/`size-desc` 按体积、`mtime`/`mtime-desc` 按修改时间、`none` 按传入顺序 |
 | `--recycle` | 删除原文件时进回收站 |
@@ -50,7 +50,7 @@ vcompress ~/videos --dry-run
 - **`[encode].encoder`**：`av1`（默认，体积最小）/ `x265`（兼容性更好）
 - **`[adaptive].target_vmaf`**（默认 95）：视觉无损基准，降到 92~93 体积更小
 - **`[adaptive].enabled`**：自适应 CRF 搜索（默认开），关闭则用固定 CRF
-- **`[remux]`**：`--remux` 重封装模式的旋钮——关键帧间隔上限（默认 5s）、GOP 重编的画质闸门（默认 VMAF 98）、允许体积涨幅（默认 10%）
+- **`[remux]`**：`--remux` 重封装模式的旋钮——重编后的关键帧间隔上限（默认 5s）、画质闸门（默认 VMAF 98）、允许体积涨幅（默认 10%）
 - **`[run].delete_original`**：默认 `false`（保留原文件），设 `true` 则默认删除原文件
 - **`[run].shutdown_when_done`**：默认 `false`；设 `true` 则所有任务结束后自动关机。压缩过程中改也生效（结束时才重读配置），关机前会自动写回 `false`，属于一次性开关。详见 [完成后自动关机](docs/configuration.md#完成后自动关机-shutdown_when_done)
 

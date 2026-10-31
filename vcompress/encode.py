@@ -135,11 +135,7 @@ def color_args(info) -> list:
 
 
 def container_maps_and_tail(container: str) -> tuple:
-    """按目标容器决定流映射与收尾参数，返回 (maps, tail)。
-
-    编码和流复制两条命令共用这一份：两边各写一遍，哪天改了 mkv 的附件映射
-    就会漏掉另一边。
-    """
+    """按目标容器决定流映射与收尾参数，返回 (maps, tail)。"""
     maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
     tail = []
     if container in MKV_LIKE:
@@ -169,31 +165,6 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         *video_args(encoder_cfg, crf),
         *(c_args or []),
         *a_args,
-        *s_args,
-        *tail,
-        "-metadata", f"comment={merge_comment(original_comment, marker)}",
-        "-progress", "pipe:1", "-nostats",
-        str(dst),
-    ]
-
-
-def build_copy_cmd(ffmpeg: str, src: Path, dst: Path, s_args: list,
-                   marker: str, original_comment: str = "") -> list:
-    """流复制重封装：视频音频逐字节照搬，只换容器（和它自带的索引）。
-
-    给重封装模式用。没有 -c:v/-crf：画面的字节一个都不动，所以也不需要
-    色彩参数——元数据随 -map_metadata 0 原样带过去。
-    """
-    container = dst.suffix.lower()
-    maps, tail = container_maps_and_tail(container)
-    return [
-        ffmpeg, "-hide_banner", "-y",
-        "-i", str(src),
-        *maps,
-        "-map_metadata", "0",
-        "-map_chapters", "0",
-        "-c:v", "copy",
-        "-c:a", "copy",
         *s_args,
         *tail,
         "-metadata", f"comment={merge_comment(original_comment, marker)}",

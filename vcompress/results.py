@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import re
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +37,24 @@ def is_permanent_failure(rec: dict) -> bool:
     那种重试只是把同一个答案再算几个小时。
     """
     return rec.get("action") == "failed" and bool(rec.get("permanent"))
+
+
+# 旧版 --remux 先扫关键帧体检，体检结论是「不用修 / 修不了」就记一条跳过。
+# 现在 --remux 不再体检，这些结论作废了；不认出来的话，体检时被放过的文件
+# 会被缓存永远挡在外面。原因串是旧代码写死的，往后不会再产生，只认这几种
+# 原话，别的跳过结论（画质/体积闸门）照旧缓存。
+STALE_REMUX_SKIP = re.compile(
+    r"^(关键帧间隔与容器都没有问题"
+    r"|容器 \S+ 没有可靠索引"       # 「目标容器也是它」「装不进」两种
+    r"|扫关键帧失败"
+    r"|读不到任何关键帧时间戳)"
+)
+
+
+def is_stale_remux_skip(rec: dict) -> bool:
+    """这条记录是不是旧版 --remux 体检留下的跳过结论。"""
+    return (rec.get("mode") == "remux" and rec.get("action") == "skipped"
+            and bool(STALE_REMUX_SKIP.match(rec.get("reason") or "")))
 
 
 def cached_reason(rec: dict) -> str:
@@ -153,6 +172,10 @@ class ResultStore:
                 and not is_permanent_failure(rec):
             return None
         if rec.get("mode", "compress") != mode:
+            return None
+        if is_stale_remux_skip(rec):
+            log.info(f"[重查] {em(path.name)}：上次是旧版 --remux 体检后跳过的"
+                     f"（{rec.get('reason')}），现在 --remux 不再体检，重新处理")
             return None
         expected = self._expected_sizes(rec, path)
         if not expected:

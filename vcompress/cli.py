@@ -125,10 +125,11 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--no-adaptive", dest="adaptive", action="store_false",
                     help="关闭自适应 CRF 搜索，直接用固定 CRF")
     ap.add_argument("--remux", action="store_true",
-                    help="重封装模式：修「检测不用再压、但快进卡顿」的文件。"
-                         "关键帧间隔超过 [remux] max_keyframe_gap_s 的重编码"
-                         "视频轨（画质按更严的 target_vmaf 控制、体积允许小涨），"
-                         "老容器流复制换新，其余照常压缩但同样收紧关键帧间隔")
+                    help="重封装模式：「不用再压」的文件不做检测，一律按配置的"
+                         "编码器重编视频轨，关键帧间隔收紧到 [remux] "
+                         "max_keyframe_gap_s 以内（画质按更严的 target_vmaf "
+                         "控制、体积允许小涨，达不到就不动）；该压的照常压缩，"
+                         "同样收紧关键帧间隔")
     ap.add_argument("--recycle", action="store_true",
                     help="删除原文件时进回收站")
     keep = ap.add_mutually_exclusive_group()

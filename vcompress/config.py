@@ -82,9 +82,8 @@ DEFAULTS = {
         "lossless": "flac",
     },
     "remux": {
-        # 重封装模式（--remux）：修「检测不用再压、但快进卡顿」的文件。
-        # 卡顿主因是关键帧间隔（GOP）太长——播放器 seek 要从上一个关键帧
-        # 逐帧解到目标位置；其次是 avi/flv/wmv/mpg 这类没有可靠索引的容器
+        # 重封装模式（--remux）：「不用再压」的文件不做检测，一律按配置的
+        # 编码器重编视频轨，关键帧间隔收紧到 max_keyframe_gap_s 以内
         "max_keyframe_gap_s": 5.0,
         # GOP 重编的画质闸门：比压缩的 95 更严——二次编码的代际损失要留余量
         "target_vmaf": 98.0,

@@ -62,7 +62,7 @@ class RunContext:
     recycle: bool = False
     keep: bool = False
     show_progress: bool = False
-    # 重封装模式：修「不用再压但快进卡顿」的文件，见 remux.py
+    # 重封装模式：「不用再压」的文件也重编一遍收紧关键帧间隔，见 remux.py
     remux: bool = False
     # None = 源文件所在目录；指定后所有产物落到这个目录（-o/--output）
     output_dir: "Path | None" = None
@@ -151,7 +151,7 @@ def _remux_skip(ctx: RunContext, info, reason: str) -> str:
 
 
 def _process_remux(ctx: RunContext, src: Path, info) -> str:
-    """重封装模式的入口：先按自己的口径筛，再把「不用再压」的送去体检。
+    """重封装模式的入口：先按自己的口径筛，再把「不用再压」的送去重编。
 
     should_skip 的五类结论在这里分两拨：标记/BPP/预估收益都是「这个文件已经
     很高效」——正是重封装的目标客户；交错和太小是「别碰它」——照旧跳过。
@@ -172,8 +172,8 @@ def _process_remux(ctx: RunContext, src: Path, info) -> str:
 
     skip, _reason = probe.should_skip(info, ctx.cfg)
     if skip:
-        # 标记/BPP/预估收益三类：已经高效，去查快进友好性
-        return _remux_analyze(ctx, src, info)
+        # 标记/BPP/预估收益三类：已经高效，不体检，直接重编收紧关键帧间隔
+        return _remux_reencode(ctx, src, info)
 
     if ctx.dry_run:
         log.info(f"[预览] 会压缩 {em(src.name)}"
@@ -184,29 +184,21 @@ def _process_remux(ctx: RunContext, src: Path, info) -> str:
     return _compress(ctx, src, info)
 
 
-def _remux_analyze(ctx: RunContext, src: Path, info) -> str:
-    """体检：量关键帧间隔，决定重编码 / 换容器 / 不动。"""
-    try:
-        stamps = remux.keyframe_timestamps(ctx.tools, src)
-    except Exception as e:
-        return _remux_skip(ctx, info, f"扫关键帧失败：{e}")
-    if not stamps:
-        return _remux_skip(ctx, info, "读不到任何关键帧时间戳，不敢动")
+def _remux_reencode(ctx: RunContext, src: Path, info) -> str:
+    """「不用再压」的文件一律重编，不先扫关键帧判断要不要修（理由见 remux.py）。"""
+    if info.interlaced:
+        # 走到这里说明 skip_interlaced 关了：压缩模式交给用户决定，但这里是
+        # 二次编码，丢交错标记是 VMAF 测不出来的视觉有损，不能为了修快进冒险
+        return _remux_skip(ctx, info, "交错源重编码会丢交错标记，不敢动")
 
     gap_s = to_float(ctx.cfg["remux"].get("max_keyframe_gap_s"), 5.0)
-    max_gap = remux.max_keyframe_gap(stamps, info.duration)
-    plan = remux.plan_remux(info, ctx.cfg, max_gap)
-
-    if not plan.strategy:
-        return _remux_skip(ctx, info, plan.reason)
-
+    keyint = remux.keyint_frames(info.fps, gap_s)
     if ctx.dry_run:
-        log.info(f"[预览] 会重封装 {em(src.name)}：{remux.describe(plan, gap_s)}")
+        log.info(f"[预览] 会重编 {em(src.name)}："
+                 f"关键帧间隔收紧到最多 {gap_s:g}s（keyint={keyint}，"
+                 f"{ctx.encoder}）")
         return ctx.stats.record(DRYRUN)
-
-    if plan.strategy == remux.GOP:
-        return _remux_gop(ctx, src, info, plan)
-    return _remux_copy(ctx, src, info, plan)
+    return _remux_gop(ctx, src, info)
 
 
 def _compress(ctx: RunContext, src: Path, info) -> str:
@@ -352,8 +344,8 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
         )
 
 
-def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
-    """GOP 修复：只重编码视频轨，音轨/字幕/章节原样复制。
+def _remux_gop(ctx: RunContext, src: Path, info) -> str:
+    """重编视频轨收紧关键帧间隔，音轨/字幕/章节原样复制。
 
     和压缩流程同构但口径不同：画质闸门用 [remux] target_vmaf（更严，二次
     编码要留代际余量），体积闸门反向（允许涨到 max_growth_ratio），音轨一律
@@ -369,6 +361,7 @@ def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
         gap_s = to_float(ctx.cfg["remux"].get("max_keyframe_gap_s"), 5.0)
+        keyint = remux.keyint_frames(info.fps, gap_s)  # 和下面绑定的是同一个数
         growth_cap = to_float(ctx.cfg["remux"].get("max_growth_ratio"), 0.10)
         supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg,
                                           ctx.enc_cfg["codec"])
@@ -403,7 +396,7 @@ def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
             growth = predicted / info.size - 1
             log.info(f"[预估] {em(src.name)}：crf="
                      f"{em(encode.fmt_crf(picked.crf))}，keyint="
-                     f"{em(str(plan.keyint))}，样本实测 "
+                     f"{em(str(keyint))}，样本实测 "
                      f"{picked.video_bitrate // 1000} kbps，预计 "
                      f"~{fmt_size(predicted)}（{growth:+.1%}）")
             if predicted > limit:
@@ -413,9 +406,9 @@ def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
                     f"{growth_cap:.0%} 上限，不动它"
                 )
 
-        log.info(f"[重封装] {em(src.name)}：重编码修关键帧间隔"
-                 f"（{plan.reason}），crf={em(encode.fmt_crf(picked.crf))}，"
-                 f"keyint={em(str(plan.keyint))}（{ctx.encoder}）")
+        log.info(f"[重封装] {em(src.name)}：重编收紧关键帧间隔"
+                 f"（最多 {gap_s:g}s），crf={em(encode.fmt_crf(picked.crf))}，"
+                 f"keyint={em(str(keyint))}（{ctx.encoder}）")
         printer(0.0)
         cmd = encode.build_cmd(
             ctx.tools.ffmpeg, src, tmp, enc_cfg, picked.crf,
@@ -452,7 +445,7 @@ def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
             target=to_float(ctx.cfg["remux"].get("target_vmaf"), 98.0),
             label="重封装目标")
 
-        _remux_commit(ctx, src, tmp, target, info, plan, ctx.encoder,
+        _remux_commit(ctx, src, tmp, target, info,
                       crf=picked.crf, elapsed=elapsed, vmaf_mean=mean,
                       vmaf_worst=worst, below_target=below)
         return ctx.stats.record(OK)
@@ -469,54 +462,13 @@ def _remux_gop(ctx: RunContext, src: Path, info, plan) -> str:
         ctx.outputs.release(src)
 
 
-def _remux_copy(ctx: RunContext, src: Path, info, plan) -> str:
-    """流复制换容器：画面逐字节不变，只修容器层的 seek 索引。"""
-    tmp = files.tmp_path(src, ctx.out_ext)
-    printer = ProgressPrinter(src.name, ctx.show_progress)
-    try:
-        base = (ctx.output_dir / src.name
-                if ctx.output_dir is not None else src)
-        target = files.output_name(base, "remux", ctx.out_ext)
-        ctx.outputs.claim(src, target, ctx.out_ext, "remux", ctx.keep)
-
-        log.info(f"[重封装] {em(src.name)}：流复制换容器（{plan.reason}），"
-                 f"画面逐字节不变")
-        printer(0.0)
-        cmd = encode.build_copy_cmd(
-            ctx.tools.ffmpeg, src, tmp,
-            tracks.subtitle_args(info, ctx.out_ext),
-            ctx.remux_marker, info.comment,
-        )
-        t0 = time.monotonic()
-        encode.run_encode(cmd, info.duration, printer)
-        elapsed = time.monotonic() - t0
-        printer(100.0)
-
-        out_info = probe.probe(ctx.tools, tmp)
-        remux.verify_copy(ctx.tools, src, tmp, info, out_info, ctx.cfg,
-                          log=log)
-        _remux_commit(ctx, src, tmp, target, info, plan, "remux",
-                      elapsed=elapsed)
-        return ctx.stats.record(OK)
-    except SkipFile as skipped:
-        printer.close()
-        files.remove_tmp(tmp)
-        log.info(f"[跳过] {em(src.name)}：{skipped}")
-        ctx.store.add("skipped", info, reason=str(skipped), mode=ctx.mode)
-        return ctx.stats.record(SKIPPED)
-    except BaseException as exc:  # noqa: BLE001 - 中断也要走清理
-        printer.close()
-        return _handle_failure(ctx, src, info, tmp, exc)
-    finally:
-        ctx.outputs.release(src)
-
-
 def _remux_commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
-                  plan, tag: str, crf=None, elapsed: float = 0.0,
+                  crf=None, elapsed: float = 0.0,
                   vmaf_mean=None, vmaf_worst=None, below_target: str = ""):
     """重封装产物落地。和 _commit 的差别：涨了也算成功（承诺是「最多涨
     一点点」而不是「必须变小」），记录里带 strategy 和 growth。"""
-    final = ctx.outputs.claim(src, target, ctx.out_ext, tag, ctx.keep, log)
+    final = ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep,
+                             log)
     in_place = not ctx.keep and files.same_path(final, src)
     if in_place and ctx.recycle:
         files.trash(src)
@@ -526,16 +478,15 @@ def _remux_commit(ctx: RunContext, src: Path, tmp: Path, target: Path, info,
 
     new_size = final.stat().st_size
     growth = (new_size / info.size - 1.0) if info.size else 0.0
-    what = "GOP 修复" if plan.strategy == remux.GOP else "流复制换容器"
     crf_txt = f"，crf={em(encode.fmt_crf(crf))}" if crf is not None else ""
     kept = "，原文件保留" if ctx.keep else ""
     log.info(
-        f"[完成] {em(src.name)}：重封装（{what}{crf_txt}），体积 "
+        f"[完成] {em(src.name)}：重封装（重编收紧关键帧间隔{crf_txt}），体积 "
         f"{em(f'{growth:+.1%}')}（{fmt_size(info.size)} -> "
         f"{em(fmt_size(new_size))}，用了 {fmt_hms(elapsed)}{kept}）"
     )
     ctx.store.add("ok", info, output=str(final), mode=ctx.mode,
-                  strategy=plan.strategy,
+                  strategy=remux.GOP,
                   crf=crf, new_size=new_size, growth=round(growth, 4),
                   seconds=round(elapsed, 1), kept=ctx.keep,
                   vmaf=round(vmaf_mean, 2) if vmaf_mean is not None else None,
