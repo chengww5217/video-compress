@@ -108,6 +108,12 @@ should_skip 说「不用再压」？ ──否─→ 正常压缩，但 keyint �
 - 量不出分数分两种：整个构建没有 libvmaf 只告警放行；有 libvmaf 却在这个文件上失败（抽样写不下去、片段解不开、libvmaf 中途崩掉）一律硬失败——画质是唯一的承诺，量不出来就不能说通过，尤其 `--delete-original` 会跟着删原文件
 - 自适应产物按 `target_vmaf` 再复核一次：`vmaf_threshold`/`vmaf_min_segment` 是给固定 CRF 兜底的灾难性失败线，比自适应承诺松得多。抽检的均值或最低段低于目标时打 WARNING、并写进 `results.jsonl` 的 `below_target` 字段，产物仍按通过保留——它过了闸门，但画质欠账不能无声无息，也不该只能靠 grep 日志才查得到
 
+### 旋转过的片源
+
+手机竖拍和后期无损旋转过的片源常带 Display Matrix。ffmpeg 默认按标记把帧转正后再编码，所以产物的编码宽高是转置后的：`1088x1920 + 旋转 90°` 编出来就是 `1920x1088`。结构校验比的是 `display_width/display_height`（转正后的尺寸），不是编码宽高；否则正常结果会被误判成"分辨率变了"。
+
+同时要求产物不带旋转标记：旋转已经进了像素，产物再带标记会被播放器转第二次。90/270 度的方向错误会体现在宽高互换上；180 度宽高不变，结构校验看不出来，方向由 VMAF 抽检兜底——参考段和待测段都按各自的标记自动转正，产物要是上下颠倒，逐帧比对会直接崩到个位数分。
+
 ### 色彩与 HDR 比对
 
 `color_check`（默认开）比对 `color_primaries`/`color_transfer`/`color_space`/`color_range` 四项，以及 HDR10 母版信息（mastering display / content light level）、HDR10+、Dolby Vision RPU 是否还在。这项不能交给 VMAF：元数据丢了但像素值不变时 VMAF 照样打 99 分，播放器却会把 BT.2020/PQ 的片子按 SDR 显示，画面发灰——那不是"视觉无损"。源本身没标的项不作要求（编码器补默认值不算退化）。

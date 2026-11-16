@@ -181,6 +181,15 @@ def added_decode_errors(ffmpeg: str, out: Path, src: Path, log=None):
     return added
 
 
+def _fmt_resolution(info) -> str:
+    """分辨率的日志写法；带旋转标记时把编码尺寸也带上，方便排查。"""
+    text = f"{info.display_width}x{info.display_height}"
+    if info.rotation:
+        text += (f"（编码尺寸 {info.width}x{info.height}，"
+                 f"旋转 {info.rotation}°）")
+    return text
+
+
 def check_basic(orig_info, out_info, cfg):
     """结构是否一致：时长、有没有视频流、分辨率、音轨与字幕条数。
 
@@ -194,13 +203,26 @@ def check_basic(orig_info, out_info, cfg):
             return False, f"时长差了 {diff:.2f}s，超过允许的 {max_diff}s"
     if not out_info.video_codec:
         return False, "产物里没有视频流"
-    # 分辨率必须一致：滤镜链写错、编码器悄悄降采样都会在这里暴露
-    if orig_info.width and orig_info.height and out_info.width and out_info.height:
-        if (orig_info.width, orig_info.height) != (out_info.width, out_info.height):
+    # 分辨率必须一致：滤镜链写错、编码器悄悄降采样都会在这里暴露。
+    # 比的是显示尺寸而不是编码尺寸：ffmpeg 默认按 Display Matrix 自动旋转，
+    # 无损旋转过的片源（1088x1920 + 旋转 90°）编出来就是 1920x1088，拿编码
+    # 尺寸比会把完全正常的结果误判成分辨率变了。
+    if (orig_info.display_width and orig_info.display_height
+            and out_info.display_width and out_info.display_height):
+        if ((orig_info.display_width, orig_info.display_height)
+                != (out_info.display_width, out_info.display_height)):
             return False, (
-                f"分辨率变了：{orig_info.width}x{orig_info.height} -> "
-                f"{out_info.width}x{out_info.height}"
+                f"分辨率变了：{_fmt_resolution(orig_info)} -> "
+                f"{_fmt_resolution(out_info)}"
             )
+    # 产物不能再带旋转标记：ffmpeg 默认已按源的 Display Matrix 把帧转正，
+    # 旋转进了像素里；产物再带标记，播放器会转第二次。90/270 度的尺寸互换
+    # 能兜住，180 度尺寸不变，只能靠这一条拦。
+    if getattr(out_info, "rotation", 0):
+        return False, (
+            f"产物带了 {out_info.rotation}° 旋转标记：画面已经按源转正，"
+            f"播放器再转一次就歪了"
+        )
     for kind, before, after in (
         ("音轨", len(orig_info.audio_codecs), len(out_info.audio_codecs)),
         ("字幕", len(orig_info.subtitle_codecs),
@@ -289,10 +311,12 @@ def vmaf_model(info, cfg) -> str:
     """按片源分辨率选 VMAF 模型。
 
     自适应搜索和这里的抽检必须用同一把尺子，所以模型选择只有一个开关
-    （[verify] vmaf_4k_model），搜索那边也读它。
+    （[verify] vmaf_4k_model），搜索那边也读它。按显示尺寸选：手机竖拍或
+    无损旋转过的片源，编码尺寸的长边在高度上，拿编码宽高会把 1080p 片源
+    错当成 4K，用更宽松的 4K 模型量出一组虚高的分数。
     """
     return vmaf.model_for(
-        getattr(info, "width", 0), getattr(info, "height", 0),
+        getattr(info, "display_width", 0), getattr(info, "display_height", 0),
         bool(cfg["verify"].get("vmaf_4k_model", True)),
     )
 

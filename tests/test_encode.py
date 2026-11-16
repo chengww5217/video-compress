@@ -110,6 +110,9 @@ class BuildCmdTests(unittest.TestCase):
         self.assertIn("-map_metadata", cmd)
         self.assertIn("-map_chapters", cmd)
         self.assertIn("comment=vcompress-v1", cmd)
+        # 画面已经由 ffmpeg 自动转正，不能把源文件的老 rotate 标签带进产物
+        self.assertIn("-metadata:s:v:0", cmd)
+        self.assertIn("rotate=", cmd)
         self.assertIn("-crf", cmd)
         self.assertIn("27", cmd)
         self.assertIn("-c:s:0", cmd)

@@ -127,6 +127,41 @@ class CheckBasicTests(unittest.TestCase):
         ok, msg = check_basic(self.orig, out, self.cfg)
         self.assertTrue(ok, msg)
 
+    def test_rotated_source_matches_upright_output(self):
+        """1088x1920 + 旋转 90° 的源，ffmpeg 会自动转正编成 1920x1088。"""
+        orig = make_info(duration=600.0, width=1088, height=1920,
+                         rotation=90)
+        out = make_info(video_codec="av1", duration=600.0,
+                        width=1920, height=1088)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertTrue(ok, msg)
+
+    def test_rotated_source_still_catches_wrong_resolution(self):
+        orig = make_info(duration=600.0, width=1088, height=1920,
+                         rotation=90)
+        out = make_info(video_codec="av1", duration=600.0,
+                        width=1280, height=720)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("分辨率变了：1920x1088", msg)
+
+    def test_half_turn_source_passes_dimension_check(self):
+        """180 度不换宽高，分辨率这项看不出问题；方向由 VMAF 抽检兜底。"""
+        orig = make_info(duration=600.0, width=1920, height=1080,
+                         rotation=180)
+        out = make_info(video_codec="av1", duration=600.0,
+                        width=1920, height=1080)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertTrue(ok, msg)
+
+    def test_output_must_not_carry_rotation_metadata(self):
+        """ffmpeg 已把画面转正，产物再带旋转标记会被播放器转第二次。"""
+        out = make_info(video_codec="av1", duration=600.0,
+                        width=1920, height=1080, rotation=180)
+        ok, msg = check_basic(self.orig, out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("产物带了 180° 旋转标记", msg)
+
 
 class CheckSizeTests(unittest.TestCase):
     """体积与实际收益。和 check_basic 分开是因为失败的后果不同：这个结论重跑
@@ -511,6 +546,11 @@ class VmafModelSelectionTests(unittest.TestCase):
 
     def test_1080p_source_gets_the_default(self):
         self.assertEqual(verify.vmaf_model(make_info(), self.cfg), "")
+
+    def test_rotated_1080p_source_uses_display_dimensions(self):
+        """1088x1920 + 旋转 90° 转正后是 1920x1088，不是 4K。"""
+        info = make_info(width=1088, height=1920, rotation=90)
+        self.assertEqual(verify.vmaf_model(info, self.cfg), "")
 
     def test_switch_can_be_turned_off(self):
         self.cfg["verify"]["vmaf_4k_model"] = False

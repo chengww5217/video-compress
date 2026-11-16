@@ -97,6 +97,7 @@ class VideoInfo:
     codec_family: str = ""
     width: int = 0
     height: int = 0
+    rotation: int = 0
     fps: float = 0.0
     bitrate: int = 0
     container_bitrate: int = 0
@@ -114,6 +115,22 @@ class VideoInfo:
     audio_bitrates: list = field(default_factory=list)
     audio_channels: list = field(default_factory=list)
     subtitle_codecs: list = field(default_factory=list)
+
+    @property
+    def display_width(self) -> int:
+        """转正后画面的宽。
+
+        width/height 是编码尺寸；带 90/270 度 Display Matrix 的片源，播放器
+        看到的是转置后的尺寸。ffmpeg 默认按标记自动旋转后再编码，所以产物
+        校验必须比这个值，否则「1088x1920 + 旋转 90°」编成「1920x1088」
+        会被误判成分辨率变了。
+        """
+        return self.height if self.rotation % 180 else self.width
+
+    @property
+    def display_height(self) -> int:
+        """转正后画面的高，见 display_width。"""
+        return self.width if self.rotation % 180 else self.height
 
     def video_bitrate(self) -> int:
         """视频轨码率；容器没给的话用总码率扣掉音轨估算。"""
@@ -153,6 +170,24 @@ def _color_tag(value) -> str:
     """规范化色彩属性值；没标的一律返回空串。"""
     text = str(value or "").strip().lower()
     return "" if text in UNSPECIFIED_COLOR else text
+
+
+def _rotation(vstream: dict) -> int:
+    """视频的显示旋转角（0/90/180/270）。
+
+    新容器把旋转写在 Display Matrix side data 里，老一些的 mkv/avi 只有
+    stream tag rotate，两处都要看。ffprobe 报的符号表示旋转方向，对判断
+    宽高是否互换来说没有区别，统一归一化成非负数。
+    """
+    for entry in vstream.get("side_data_list") or ():
+        if not isinstance(entry, dict) or entry.get("rotation") is None:
+            continue
+        value = to_int(entry.get("rotation"))
+        if value:
+            return value % 360
+    tags = {str(k).lower(): v for k, v in (vstream.get("tags") or {}).items()}
+    value = to_int(tags.get("rotate"))
+    return value % 360 if value else 0
 
 
 def _hdr_markers(*side_data_lists) -> list:
@@ -204,6 +239,7 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.codec_family = CODEC_FAMILY.get(info.video_codec, "")
     info.width = to_int(vstream.get("width"))
     info.height = to_int(vstream.get("height"))
+    info.rotation = _rotation(vstream)
     info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
         _parse_fps(vstream.get("avg_frame_rate"))
     info.pix_fmt = vstream.get("pix_fmt", "")

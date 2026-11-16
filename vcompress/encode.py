@@ -168,6 +168,9 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         *s_args,
         *tail,
         "-metadata", f"comment={merge_comment(original_comment, marker)}",
+        # 视频已经按源的旋转标记自动转正，旋转进了像素里；-map_metadata 0 会把
+        # mkv 的老 rotate 标签原样带过来，产物再带标记就会被播放器转第二次。
+        "-metadata:s:v:0", "rotate=",
         "-progress", "pipe:1", "-nostats",
         str(dst),
     ]

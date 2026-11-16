@@ -6,7 +6,7 @@ import unittest
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.probe import (_color_tag, _hdr_markers, _parse_fps,
+from vcompress.probe import (_color_tag, _hdr_markers, _parse_fps, _rotation,
                              _stream_bitrate, should_skip)
 from vcompress.util import to_int as _to_int
 
@@ -37,6 +37,34 @@ class ColorMetadataTests(unittest.TestCase):
     def test_dolby_vision_recognised(self):
         self.assertEqual(_hdr_markers([{"side_data_type": "Dolby Vision RPU Data"}]),
                          ["dolby-vision"])
+
+
+class RotationTests(unittest.TestCase):
+    """旋转过的片源，编码尺寸和播放器看到的尺寸是反的。"""
+
+    def test_display_matrix_rotation(self):
+        stream = {"side_data_list": [{"side_data_type": "Display Matrix",
+                                      "rotation": 90}]}
+        self.assertEqual(_rotation(stream), 90)
+
+    def test_negative_rotation_is_normalised(self):
+        stream = {"side_data_list": [{"rotation": -90}]}
+        self.assertEqual(_rotation(stream), 270)
+
+    def test_rotation_from_legacy_tag(self):
+        self.assertEqual(_rotation({"tags": {"rotate": "270"}}), 270)
+
+    def test_rotation_zero_when_missing(self):
+        self.assertEqual(_rotation({}), 0)
+        self.assertEqual(_rotation({"side_data_list": [{}]}), 0)
+
+    def test_display_dimensions_swap_for_quarter_turns(self):
+        info = make_info(width=1088, height=1920, rotation=90)
+        self.assertEqual((info.display_width, info.display_height),
+                         (1920, 1088))
+        info = make_info(width=1088, height=1920, rotation=180)
+        self.assertEqual((info.display_width, info.display_height),
+                         (1088, 1920))
 
 
 class ParseHelperTests(unittest.TestCase):
