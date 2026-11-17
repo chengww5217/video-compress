@@ -107,6 +107,10 @@ class VideoInfo:
     # VFR 片源不能按容器标称帧率压：30fps 段会被悄悄抽成 24.75fps。
     # target_fps/rate 是实际编码（以及 VMAF 抽样）用的统一口径。
     vfr: bool = False
+    vfr_max_fps: float = 0.0
+    # 目标帧率低于全片最高帧率时，高于目标的那部分帧会被丢弃；这是源帧
+    # 总数里的比例，只允许是「少量」（见 [encode] vfr_max_drop_ratio）。
+    vfr_drop_ratio: float = 0.0
     target_fps: float = 0.0
     target_rate: str = ""
     bitrate: int = 0
@@ -192,6 +196,10 @@ RATE_BUCKET_US = 10
 # 一个帧率至少要有这么多帧才认。时间戳毛刺常常只影响一两帧；而真正的高
 # 帧率段哪怕只有 0.1 秒，在 120fps 下也有 12 帧。
 MIN_RATE_SAMPLES = 3
+# 候选帧率占全片帧数的下限。只出现几帧的 60fps 很可能是时间戳毛刺，不能
+# 因此把整片从 24fps 抬到 60fps——那会把编码时间翻几倍。低于这个占比的
+# 高帧段直接按「可丢弃的少量高帧」处理。
+MIN_RATE_SHARE = 0.001
 # 时间戳坏掉时可能造出 1ms 一帧的「1000fps」。限制在编码器真正有意义的范围。
 MIN_RATE_FPS = 1.0
 MAX_RATE_FPS = 240.0
@@ -214,7 +222,7 @@ STANDARD_RATES = (
 )
 
 VFR_UNRESOLVED_REASON = (
-    "可变帧率（VFR），但探测不出最高帧率；按标称帧率压会丢帧，跳过"
+    "可变帧率（VFR），但探测不出可用的目标帧率；按标称帧率压会丢帧，跳过"
 )
 
 
@@ -230,9 +238,17 @@ def _rate_string(fps: float, prefer: str = "") -> str:
     preferred = _parse_fps(prefer)
     if preferred > 0 and abs(preferred - fps) <= max(0.01, fps * 1e-4):
         return prefer
+    best = None
     for standard, text in STANDARD_RATES:
-        if abs(standard - fps) <= max(0.01, standard * 0.001):
-            return text
+        diff = abs(standard - fps)
+        if diff > max(0.01, standard * 0.001):
+            continue
+        # 取最接近的，而不是先遇到的：59.988 同时落在 59.94 和 60 的
+        # 0.1% 容差里，只有按距离选才不会把 60fps 写成 59.94。
+        if best is None or diff < best[0]:
+            best = (diff, text)
+    if best is not None:
+        return best[1]
     return f"{fps:.6f}".rstrip("0").rstrip(".")
 
 
@@ -247,12 +263,20 @@ def _detect_vfr(nominal: float, average: float) -> bool:
     return abs(nominal - average) > max(0.05, nominal * 0.005)
 
 
-def _max_rate_from_durations(durations) -> float:
-    """从 packet 时长里找全片出现过的最高帧率。
+def _rate_plan_from_durations(durations, max_drop_ratio: float = 0.05) -> tuple:
+    """从 packet 时长里选编码目标帧率。
 
-    取最短时长能保证不丢帧，但单个损坏包可能造出 1ms 的假帧率。所以按时长
-    分桶计数，至少要出现 MIN_RATE_SAMPLES 次才认；再按从短到长找第一个
-    过门槛的桶，就是全片出现过的最高帧率。
+    返回 `(目标帧率, 全片最高可靠帧率, 被丢弃帧的比例)`。
+
+    目标不是无脑取最高：允许丢掉少量高帧片段，换更低的编码帧率。按帧数
+    从高到低累计，选「高于它的帧占比不超过 max_drop_ratio」的最低帧率。
+    默认 5%：24fps 为主、只有 2% 60fps 的片源按 24fps 压，丢掉那 2%；
+    30fps 占 63.7% 的片源仍按 30fps 压，一帧不丢。
+
+    单个损坏包可能造出 1ms 的假帧率，所以候选帧率至少要占全片
+    MIN_RATE_SHARE（0.1%）且不少于 MIN_RATE_SAMPLES 帧；时间戳坏掉的
+    超范围时长直接忽略。低于门槛的高帧帧仍会算进丢弃比例，不会被偷偷
+    当成「没发生」。
     """
     counts = Counter()
     total = 0
@@ -266,25 +290,48 @@ def _max_rate_from_durations(durations) -> float:
         bucket = int(round(duration * 1_000_000 / RATE_BUCKET_US)) * RATE_BUCKET_US
         if bucket <= 0:
             continue
-        counts[bucket] += 1
-        total += 1
-    if not counts:
-        return 0.0
-    threshold = max(MIN_RATE_SAMPLES, round(total * 0.00001))
-    for bucket in sorted(counts):
         rate = 1_000_000 / bucket
         if not MIN_RATE_FPS <= rate <= MAX_RATE_FPS:
             continue
+        counts[bucket] += 1
+        total += 1
+    if not counts:
+        return 0.0, 0.0, 0.0
+
+    # 候选帧率要同时满足「至少 3 帧」和「至少占全片 0.1%」：前者过滤单包
+    # 毛刺，后者防止几帧 60fps 把整片从 24fps 抬到 60fps。低于门槛的帧
+    # 不算候选，但仍计入会被丢弃的帧数。
+    threshold = max(MIN_RATE_SAMPLES, round(total * MIN_RATE_SHARE))
+    budget = max(0.0, min(1.0, float(max_drop_ratio))) * total
+    chosen = None
+    highest = 0.0
+    dropped = 0
+    # 从高帧率（短时长）往低帧率走。dropped 是当前候选之上、已经确定
+    # 会被丢掉的帧数；只有没超预算的候选才配当目标。
+    for bucket in sorted(counts):
         if counts[bucket] >= threshold:
-            return rate
-    return 0.0
+            if chosen is None:
+                highest = 1_000_000 / bucket
+            if dropped <= budget:
+                chosen = bucket
+            else:
+                break
+        dropped += counts[bucket]
+        if chosen is not None and dropped > budget:
+            break
+    if chosen is None:
+        return 0.0, 0.0, 0.0
+    dropped = sum(n for bucket, n in counts.items() if bucket < chosen)
+    return 1_000_000 / chosen, highest, dropped / total
 
 
-def _probe_max_rate(ffprobe: str, path: Path) -> float:
-    """扫全片 packet 时长，返回出现过的最高帧率；失败返回 0。
+def _probe_rate_plan(ffprobe: str, path: Path,
+                     max_drop_ratio: float) -> tuple:
+    """扫全片 packet 时长，返回 `(目标帧率, 最高帧率, 丢弃比例)`。
 
     只对 VFR 片源做。通读一遍容器层（7.5GB 实测约一分钟），相对几小时的
     编码可以忽略；抽样几个窗口则可能正好漏掉一段 60fps，压出来就丢帧了。
+    失败返回 `(0, 0, 0)`，调用方会跳过这个文件。
     """
     cmd = [
         ffprobe, "-v", "error",
@@ -300,8 +347,8 @@ def _probe_max_rate(ffprobe: str, path: Path) -> float:
     if rc != 0:
         log.warning("扫描可变帧率失败（ffprobe 退出码 %s）：%s",
                     rc, (err or "").strip()[:200])
-        return 0.0
-    return _max_rate_from_durations(out.splitlines())
+        return 0.0, 0.0, 0.0
+    return _rate_plan_from_durations(out.splitlines(), max_drop_ratio)
 
 
 def _stream_bitrate(stream: dict) -> int:
@@ -354,7 +401,8 @@ def _hdr_markers(*side_data_lists) -> list:
     return sorted(found)
 
 
-def probe(tools: Tools, path: Path) -> VideoInfo:
+def probe(tools: Tools, path: Path,
+          vfr_max_drop_ratio: float = 0.05) -> VideoInfo:
     cmd = [
         tools.ffprobe,
         "-v", "error",
@@ -392,9 +440,13 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.avg_fps = _parse_fps(average_rate) or info.fps
     info.vfr = _detect_vfr(info.fps, info.avg_fps)
     if info.vfr:
-        # 混合帧率必须按全片最高帧率做 CFR：按标称 24.75 压，30fps 段会被
-        # 每六帧丢一帧；只有 -r 30 才会把 24.75 段补成重复帧而不是丢 30fps 段。
-        target = _probe_max_rate(tools.ffprobe, path)
+        # 不能按标称 24.75 压：30fps 段会被悄悄抽帧。目标帧率从全片 packet
+        # 时长里选，默认只允许丢掉 5% 以内的高帧片段；30fps 占多数的片源
+        # 仍会选 30fps，不会被标称帧率带偏。
+        target, highest, dropped = _probe_rate_plan(
+            tools.ffprobe, path, vfr_max_drop_ratio)
+        info.vfr_max_fps = highest
+        info.vfr_drop_ratio = dropped
         info.target_rate = _rate_string(target, prefer=nominal_rate)
         # 以规范写法的有理数为准：packet 时长倒数算出来是 30.003，拿它做
         # 帧对齐会在片尾漂出十几帧，切点又压回帧边界上。实际编码用的是
@@ -449,7 +501,7 @@ def should_skip(info: VideoInfo, cfg: dict):
             f"播放器不再反交错"
         )
 
-    # 探测不出 VFR 的最高帧率时不能硬压：ffmpeg 会按标称帧率做 CFR，
+    # 探测不出 VFR 的目标帧率时不能硬压：ffmpeg 会按标称帧率做 CFR，
     # 高帧率段直接被抽帧，而 VMAF 未必看得出来（它比的也是抽过帧的片段）。
     if info.vfr and info.target_fps <= 0:
         return True, VFR_UNRESOLVED_REASON

@@ -41,6 +41,8 @@ wmv3 = 0.50
 [encode]
 encoder = "av1"            # 用哪个 [encode.*] 节
 output_container = ".mkv"
+# 混合帧率片源允许丢掉多少高帧，按帧数分位选目标帧率；0 = 一帧不丢
+vfr_max_drop_ratio = 0.05
 
 # preset 2 = 最慢最小的极限档；crf 只在 --no-adaptive 时生效（否则被搜索结果覆盖）。
 # min_bit_depth = 10：8-bit 源也用 10-bit 编，精度更高、更不容易 banding，写 8 则照源片位深。

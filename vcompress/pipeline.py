@@ -116,7 +116,10 @@ class SkipFile(Exception):
 
 def process_file(ctx: RunContext, src: Path) -> str:
     try:
-        info = probe.probe(ctx.tools, src)
+        info = probe.probe(
+            ctx.tools, src,
+            vfr_max_drop_ratio=to_float(
+                ctx.cfg["encode"].get("vfr_max_drop_ratio"), 0.05))
     except Exception as e:
         log.error(f"[失败] {em(src.name)}：探测失败：{e}")
         if not ctx.dry_run:
@@ -128,11 +131,16 @@ def process_file(ctx: RunContext, src: Path) -> str:
 
     if info.vfr:
         if info.target_fps > 0:
+            if info.vfr_drop_ratio > 0:
+                action = (f"按 {info.target_fps:.3f} fps 做 CFR，"
+                          f"丢弃约 {info.vfr_drop_ratio:.2%} 的高帧")
+            else:
+                action = f"按 {info.target_fps:.3f} fps 做 CFR，不丢帧"
             log.info(f"[探测] {em(src.name)}：可变帧率（标称 {info.fps:.3f} fps，"
-                     f"平均 {info.avg_fps:.3f} fps），按最高 "
-                     f"{em(f'{info.target_fps:.3f}')} fps 做 CFR 编码，不丢帧")
+                     f"平均 {info.avg_fps:.3f} fps，最高 {info.vfr_max_fps:.3f} fps），"
+                     f"{action}")
         else:
-            log.warning(f"[探测] {em(src.name)}：可变帧率，但探测不出最高帧率")
+            log.warning(f"[探测] {em(src.name)}：可变帧率，但探测不出可用的目标帧率")
 
     if ctx.remux:
         return _process_remux(ctx, src, info)

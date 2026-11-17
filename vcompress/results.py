@@ -145,6 +145,15 @@ class ResultStore:
                 "size": info.size,
                 "duration": round(info.duration, 3),
             })
+            if getattr(info, "vfr", False):
+                # 丢帧是永久的，不能只留在日志里；下次翻记录时要能看到
+                # 这个文件按多少帧率压、丢了多少高帧。
+                rec.update({
+                    "fps": round(info.fps, 3),
+                    "vfr_max_fps": round(info.vfr_max_fps, 3),
+                    "target_fps": round(info.target_fps, 3),
+                    "vfr_drop_ratio": round(info.vfr_drop_ratio, 4),
+                })
         rec.update(extra)
         with self.lock:
             with open(self.path, "a", encoding="utf-8") as f:

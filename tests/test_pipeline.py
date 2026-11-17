@@ -68,7 +68,9 @@ class PipelineTestCase(unittest.TestCase):
         out = out_info or make_info(path=self.tmp_file(), video_codec="av1",
                                     size=len(self.encoded), duration=10.0)
 
-        def probe_side_effect(tools, path):
+        def probe_side_effect(tools, path, **kw):
+            if Path(path) == self.src:
+                self.probe_kwargs = kw
             return self.info if Path(path) == self.src else out
 
         run_all = (mock.Mock(return_value=(95.0, 94.5)) if verify_ok
@@ -100,6 +102,7 @@ class HappyPathTests(PipelineTestCase):
         """混合帧率片源不显式 -r，30fps 段会被 ffmpeg 按 24.75 抽掉。"""
         self.info = make_info(path=self.src, size=1000, duration=10.0,
                               fps=24.75, avg_fps=27.85, vfr=True,
+                              vfr_max_fps=30.0, vfr_drop_ratio=0.0,
                               target_fps=30.0, target_rate="30")
         seen = {}
 
@@ -110,6 +113,16 @@ class HappyPathTests(PipelineTestCase):
         _ctx, outcome = self.run_one(run_encode)
         self.assertEqual(outcome, pipeline.OK)
         self.assertEqual(seen["cmd"][seen["cmd"].index("-r") + 1], "30")
+        rec = self.store.last(self.src)
+        self.assertEqual(rec["target_fps"], 30.0)
+        self.assertEqual(rec["vfr_max_fps"], 30.0)
+        self.assertEqual(rec["vfr_drop_ratio"], 0.0)
+
+    def test_vfr_drop_budget_is_passed_to_probe(self):
+        self.cfg["encode"]["vfr_max_drop_ratio"] = 0.01
+        _ctx, outcome = self.run_one(self.fake_encode())
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(self.probe_kwargs["vfr_max_drop_ratio"], 0.01)
 
     def test_keep_mode_leaves_the_original_alone(self):
         ctx, outcome = self.run_one(self.fake_encode(), keep=True)

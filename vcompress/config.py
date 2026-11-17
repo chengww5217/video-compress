@@ -41,6 +41,10 @@ DEFAULTS = {
     "encode": {
         "encoder": "av1",
         "output_container": ".mkv",
+        # 混合帧率片源允许丢掉多少高帧：按帧数分位选目标帧率，高于目标的
+        # 帧会被丢弃。默认 5%——少量 60fps 片段不值得把整片抬到 60fps；
+        # 写 0 表示一帧不丢，始终按全片最高帧率编码。
+        "vfr_max_drop_ratio": 0.05,
         "av1": {
             "codec": "libsvtav1",
             "preset": "2",
@@ -146,6 +150,7 @@ FREEFORM_TABLES = {("skip", "bpp"), ("skip", "expected_ratio")}
 # 取值必须落在 [0, 1] 的比例项
 RATIO_KEYS = {
     ("skip", "min_saving_ratio"),
+    ("encode", "vfr_max_drop_ratio"),
     ("verify", "min_actual_saving"),
     ("remux", "max_growth_ratio"),
 }

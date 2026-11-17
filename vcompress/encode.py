@@ -165,8 +165,8 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         "-map_chapters", "0",
         *video_args(encoder_cfg, crf),
         # 显式 CFR。VFR/混合帧率片源不指定的话，ffmpeg 按容器标称帧率输出，
-        # 高帧率段会被悄悄抽帧（实测 30fps 段压完只剩 24.75fps）。CFR 到
-        # 全片最高帧率会把低帧率段补成重复帧，一帧不丢。
+        # 高帧率段会被悄悄抽帧（实测 30fps 段压完只剩 24.75fps）。按探测出
+        # 的目标帧率做 CFR：低帧率段补重复帧，少量高帧段按配置丢弃。
         *(["-r", rate] if rate else []),
         *(c_args or []),
         *a_args,

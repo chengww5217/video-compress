@@ -212,7 +212,7 @@ class RemuxPipelineTestCase(unittest.TestCase):
                              size=len(self.encoded), duration=600.0,
                              comment="vcompress-remux-v1")
 
-        def probe_side_effect(tools, path):
+        def probe_side_effect(tools, path, **kw):
             return self.info if Path(path) == self.src else out_info
 
         def default_encode(cmd, duration, cb=None):

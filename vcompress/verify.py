@@ -203,7 +203,7 @@ def check_basic(orig_info, out_info, cfg):
             return False, f"时长差了 {diff:.2f}s，超过允许的 {max_diff}s"
     if not out_info.video_codec:
         return False, "产物里没有视频流"
-    # 帧率必须和编码目标一致。VFR 片源按最高帧率做 CFR，产物若退回标称
+    # 帧率必须和编码目标一致。VFR 片源按探测出的目标帧率做 CFR，产物若退回标称
     # 帧率，高帧率段就少了一批帧；这一步只比元数据，必须在昂贵的解码/VMAF
     # 之前拦下来。
     target_fps = getattr(orig_info, "encode_fps", 0.0) or 0.0

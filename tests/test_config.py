@@ -85,6 +85,11 @@ class SamplingConsistencyTests(unittest.TestCase):
         """系统临时目录多半是内存盘，几个 G 的无损样本放不下。"""
         self.assertTrue(config.DEFAULTS["run"]["temp_dir"])
 
+    def test_vfr_allows_only_a_small_share_of_frames_to_be_dropped(self):
+        ratio = config.DEFAULTS["encode"]["vfr_max_drop_ratio"]
+        self.assertGreater(ratio, 0)
+        self.assertLessEqual(ratio, 0.05)
+
 
 class MergeTests(unittest.TestCase):
     def test_missing_sections_are_filled_in(self):
@@ -163,6 +168,10 @@ class ValidationTests(unittest.TestCase):
     def test_ratio_out_of_range_is_rejected(self):
         self.assert_rejected({"skip": {"min_saving_ratio": 1.5}},
                              "必须在 0 和 1 之间")
+
+    def test_vfr_drop_ratio_must_be_a_ratio(self):
+        self.assert_rejected({"encode": {"vfr_max_drop_ratio": 1.5}},
+                             "vfr_max_drop_ratio", "0 和 1 之间")
 
     def test_crf_bounds_must_be_ordered(self):
         self.assert_rejected({"adaptive": {"crf_min": 40, "crf_max": 20}},

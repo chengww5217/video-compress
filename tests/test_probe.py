@@ -10,7 +10,7 @@ import helpers
 from helpers import make_cfg, make_info
 from vcompress import probe
 from vcompress.probe import (_color_tag, _detect_vfr, _hdr_markers,
-                             _max_rate_from_durations, _parse_fps,
+                             _parse_fps, _rate_plan_from_durations,
                              _rate_string, _rotation, _stream_bitrate,
                              should_skip)
 from vcompress.util import to_int as _to_int
@@ -247,7 +247,7 @@ class InterlacedTests(unittest.TestCase):
 
 
 class VariableFrameRateTests(unittest.TestCase):
-    """混合帧率片源：按最高帧率做 CFR，否则高帧率段会被悄悄抽帧。"""
+    """混合帧率：按帧数分位选目标；少量高帧可丢，占多数的帧率不能丢。"""
 
     def test_detects_mixed_frame_rate(self):
         self.assertTrue(_detect_vfr(99 / 4, 2477295 / 88943))
@@ -260,27 +260,67 @@ class VariableFrameRateTests(unittest.TestCase):
         self.assertFalse(_detect_vfr(0.0, 30.0))
         self.assertFalse(_detect_vfr(30.0, 0.0))
 
-    def test_mixed_durations_pick_the_highest_rate(self):
-        durations = ["0.040404"] * 100 + ["0.033333"] * 50
-        self.assertAlmostEqual(_max_rate_from_durations(durations), 30.0,
-                               places=2)
+    def test_dominant_rate_is_kept(self):
+        """30fps 占多数时不能降到标称的 24.75，否则大段丢帧。"""
+        durations = ["0.040404"] * 30 + ["0.033333"] * 70
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 30.0, places=2)
+        self.assertAlmostEqual(highest, 30.0, places=2)
+        self.assertEqual(dropped, 0.0)
+
+    def test_small_high_rate_burst_is_dropped(self):
+        """只有 2% 的 60fps，按 24.75 压、丢掉这 2%，不把整片抬到 60。"""
+        durations = ["0.040404"] * 196 + ["0.016667"] * 4
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 24.75, places=2)
+        self.assertAlmostEqual(highest, 60.0, places=1)
+        self.assertAlmostEqual(dropped, 0.02, places=3)
+
+    def test_zero_budget_keeps_every_frame(self):
+        durations = ["0.040404"] * 196 + ["0.016667"] * 4
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.0)
+        self.assertAlmostEqual(target, highest, places=2)
+        self.assertAlmostEqual(target, 60.0, places=1)
+        self.assertEqual(dropped, 0.0)
+
+    def test_high_rate_beyond_budget_is_not_dropped(self):
+        """10% 的 60fps 超过 5% 预算，宁可整片 60fps 也不丢这一成帧。"""
+        durations = ["0.040404"] * 90 + ["0.016667"] * 10
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 60.0, places=1)
+        self.assertAlmostEqual(highest, 60.0, places=1)
+        self.assertEqual(dropped, 0.0)
+
+    def test_a_few_high_frames_do_not_raise_the_target(self):
+        """3 帧 60fps 可能是毛刺，不能因此把整片从 24.75 抬到 60。"""
+        durations = ["0.040404"] * 9997 + ["0.016667"] * 3
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 24.75, places=2)
+        self.assertAlmostEqual(highest, 24.75, places=2)
+        self.assertAlmostEqual(dropped, 0.0003, places=4)
 
     def test_one_off_timestamp_glitch_is_ignored(self):
         durations = ["0.040404"] * 100 + ["0.001"]  # 假 1000fps
-        self.assertAlmostEqual(_max_rate_from_durations(durations), 24.75,
-                               places=2)
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 24.75, places=2)
+        self.assertAlmostEqual(highest, 24.75, places=2)
+        self.assertEqual(dropped, 0.0)
 
     def test_uniform_cfr_keeps_its_rate(self):
-        self.assertAlmostEqual(
-            _max_rate_from_durations(["0.041708"] * 100), 24000 / 1001,
-            places=2)
+        target, highest, dropped = _rate_plan_from_durations(
+            ["0.041708"] * 100, 0.05)
+        self.assertAlmostEqual(target, 24000 / 1001, places=2)
+        self.assertAlmostEqual(highest, 24000 / 1001, places=2)
+        self.assertEqual(dropped, 0.0)
 
     def test_no_usable_durations_is_zero(self):
-        self.assertEqual(_max_rate_from_durations([]), 0.0)
-        self.assertEqual(_max_rate_from_durations(["N/A", "0", "-1"]), 0.0)
+        for durations in ([], ["N/A", "0", "-1", "0.001"]):
+            self.assertEqual(_rate_plan_from_durations(durations),
+                             (0.0, 0.0, 0.0))
 
     def test_rates_are_normalised_for_ffmpeg(self):
         self.assertEqual(_rate_string(30.0003), "30")
+        self.assertEqual(_rate_string(59.988), "60")
         self.assertEqual(_rate_string(24000 / 1001), "24000/1001")
         self.assertEqual(_rate_string(24.75, prefer="99/4"), "99/4")
         self.assertEqual(_rate_string(0), "")
@@ -307,25 +347,47 @@ class ProbeTargetRateTests(unittest.TestCase):
             "frames": [],
         }
 
-    def run_probe(self, data, durations=None, rc=0):
+    def run_probe(self, data, durations=None, rc=0, ratio=0.05):
         replies = [(0, json.dumps(data), "")]
         if durations is not None:
             replies.append((rc, durations, ""))
         with mock.patch.object(probe.proc, "run_managed",
                                side_effect=replies):
-            return probe.probe(helpers.FakeTools(), self.path)
+            return probe.probe(helpers.FakeTools(), self.path,
+                               vfr_max_drop_ratio=ratio)
 
-    def test_mixed_frame_rate_uses_the_highest_rate(self):
+    def test_dominant_rate_wins_over_the_nominal_rate(self):
         info = self.run_probe(
             self.stream("99/4", "2477295/88943"),
             "0.040404\n" * 100 + "0.033333\n" * 50)
         self.assertTrue(info.vfr)
         self.assertAlmostEqual(info.fps, 24.75, places=3)
         self.assertAlmostEqual(info.avg_fps, 2477295 / 88943, places=3)
+        self.assertAlmostEqual(info.vfr_max_fps, 30.0, places=2)
+        self.assertEqual(info.vfr_drop_ratio, 0.0)
         self.assertEqual(info.target_fps, 30.0)
         self.assertEqual(info.target_rate, "30")
         self.assertEqual(info.encode_fps, 30.0)
         self.assertEqual(info.encode_rate, "30")
+
+    def test_small_high_rate_burst_falls_back_to_the_nominal_rate(self):
+        info = self.run_probe(
+            self.stream("99/4", "2477295/88943"),
+            "0.040404\n" * 196 + "0.016667\n" * 4)
+        self.assertTrue(info.vfr)
+        self.assertAlmostEqual(info.vfr_max_fps, 60.0, places=1)
+        self.assertAlmostEqual(info.vfr_drop_ratio, 0.02, places=3)
+        self.assertAlmostEqual(info.target_fps, 24.75, places=3)
+        self.assertEqual(info.target_rate, "99/4")
+
+    def test_zero_drop_budget_uses_the_highest_rate(self):
+        info = self.run_probe(
+            self.stream("99/4", "2477295/88943"),
+            "0.040404\n" * 196 + "0.016667\n" * 4,
+            ratio=0.0)
+        self.assertAlmostEqual(info.target_fps, 60.0, places=1)
+        self.assertEqual(info.target_rate, "60")
+        self.assertEqual(info.vfr_drop_ratio, 0.0)
 
     def test_cfr_source_keeps_the_exact_rational_rate(self):
         info = self.run_probe(self.stream("24000/1001", "24000/1001"))
