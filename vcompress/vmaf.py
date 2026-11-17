@@ -18,7 +18,10 @@ class VmafError(RuntimeError):
 
 # ---------------------------------------------------------------------- 抽样
 
-SEEK_LEADIN_S = 2.0
+# 粗 seek 提前量。mp4/matroska 会停在目标之前的关键帧上，2 秒就够；mpegts
+# 这类没有可靠索引的容器会落到目标之后的关键帧，提前量必须盖住一个 GOP，
+# 否则要量的那段会被整段跳过去。多解码 8 秒相对几小时的编码可以忽略。
+SEEK_LEADIN_S = 10.0
 
 
 def frame_aligned_start(start: float, fps: float) -> float:
@@ -76,7 +79,7 @@ def lossless_args(codec: str = "libx264") -> list:
 def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
                 out: Path, codec: str = "libx264",
                 rate: str = "") -> list:
-    """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确 seek 微调。
+    """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确切到目标位置。
 
     只用精确 seek（-ss 放在 -i 之后）要从文件开头解码，两小时的片子抽三段
     就是三次近全片解码；只用快速 seek 会停在关键帧上，参考片段和待测片段
@@ -85,17 +88,36 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
     用 0:V:0 而不是 0:v:0：v 会把封面图（attached_pic）算成视频流，真编码
     时用的是 0:V（排除封面），两边取的流必须是同一条才有比较意义。
 
-    rate 是 VFR 片源的统一帧率口径。不给的话 ffmpeg 按标称帧率抽，混合
-    帧率片源的参考段和产物段会各自丢掉不同的一组帧，VMAF 直接变成乱比。
+    rate 是 VFR 片源的统一帧率口径。输入 -ss 会把时间戳归零到粗 seek 点，
+    直接按 -r 重采样等于把网格锚在切点上；源片和产物的切点相位不同，逐帧
+    比较就会整体错开。这里先用 setpts 把粗 seek 的偏移加回去，还原「离片头
+    的时间」，再用 fps=fps=...:start_time=0 把参考段和待测段钉在同一条全局
+    CFR 网格上。输出侧的 -ss <start> 落在这条网格上，切点前后不会差一帧。
+    源文件起始 PTS 不为 0 也不用特殊处理：输入 -ss 同样按它的起点归一化。
+
+    rate 为空时保持原来的两段式 seek 和 ffmpeg 默认帧率，供不关心帧率的
+    调用方使用。
     """
     lead = min(SEEK_LEADIN_S, max(0.0, start))
+    seek = f"{max(0.0, start - lead):.3f}"
+    if not rate:
+        return [
+            ffmpeg, "-hide_banner", "-nostats",
+            "-y",
+            "-ss", seek,
+            "-i", str(src),
+            "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
+            "-map", "0:V:0", "-an", "-sn", "-dn",
+            *lossless_args(codec),
+            str(out),
+        ]
     return [
         ffmpeg, "-hide_banner", "-nostats",
         "-y",
-        "-ss", f"{max(0.0, start - lead):.3f}",
+        "-ss", seek,
         "-i", str(src),
-        "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
-        *(["-r", rate] if rate else []),
+        "-vf", f"setpts=PTS+{seek}/TB,fps=fps={rate}:start_time=0",
+        "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}",
         "-map", "0:V:0", "-an", "-sn", "-dn",
         *lossless_args(codec),
         str(out),

@@ -51,9 +51,9 @@ class PooledScoreTests(unittest.TestCase):
 
 
 class SegmentCmdTests(unittest.TestCase):
-    def cmd(self, start, seconds=5.0):
+    def cmd(self, start, seconds=5.0, rate=""):
         return vmaf.segment_cmd("ffmpeg", Path("in.mkv"), start, seconds,
-                                  Path("out.mkv"))
+                                  Path("out.mkv"), rate=rate)
 
     def seeks(self, cmd):
         i = cmd.index("-i")
@@ -62,12 +62,15 @@ class SegmentCmdTests(unittest.TestCase):
         second = cmd.index("-ss", i)
         return float(cmd[first + 1]), float(cmd[second + 1])
 
-    def test_two_stage_seek_adds_up_to_start(self):
+    def vf(self, cmd):
+        return cmd[cmd.index("-vf") + 1]
+
+    def test_two_stage_seek_adds_up_to_start_without_rate(self):
         pre, post = self.seeks(self.cmd(600.0))
         self.assertAlmostEqual(pre + post, 600.0, places=3)
         self.assertAlmostEqual(post, vmaf.SEEK_LEADIN_S, places=3)
 
-    def test_no_negative_seek_near_the_head(self):
+    def test_no_negative_seek_near_the_head_without_rate(self):
         pre, post = self.seeks(self.cmd(0.5))
         self.assertEqual(pre, 0.0)
         self.assertAlmostEqual(pre + post, 0.5, places=3)
@@ -75,6 +78,28 @@ class SegmentCmdTests(unittest.TestCase):
     def test_zero_start(self):
         pre, post = self.seeks(self.cmd(0.0))
         self.assertEqual((pre, post), (0.0, 0.0))
+
+    def test_rate_anchors_the_grid_at_the_global_timeline(self):
+        """切点必须落在离片头的全局 CFR 网格上，不能锚在粗 seek 点。
+
+        输入 -ss 会把时间戳归零到 seek 点；setpts 把提前量加回去，fps 的
+        start_time=0 再把网格锚回片头。参考段和待测段因此共用同一条网格。
+        """
+        cmd = self.cmd(600.0, rate="30")
+        pre, cut = self.seeks(cmd)
+        self.assertAlmostEqual(pre, 600.0 - vmaf.SEEK_LEADIN_S, places=3)
+        self.assertAlmostEqual(cut, 600.0, places=3)
+        vf = self.vf(cmd)
+        self.assertIn(f"setpts=PTS+{pre:.3f}/TB", vf)
+        self.assertIn("fps=fps=30:start_time=0", vf)
+        self.assertNotIn("-r", cmd)
+
+    def test_rate_near_the_head_keeps_the_cut_absolute(self):
+        cmd = self.cmd(0.5, rate="30")
+        pre, cut = self.seeks(cmd)
+        self.assertEqual(pre, 0.0)
+        self.assertAlmostEqual(cut, 0.5, places=3)
+        self.assertIn("setpts=PTS+0.000/TB", self.vf(cmd))
 
     def test_segment_is_lossless_video_only(self):
         cmd = self.cmd(10.0)
@@ -89,13 +114,14 @@ class SegmentCmdTests(unittest.TestCase):
 
     def test_explicit_rate_keeps_vfr_samples_on_one_grid(self):
         """参考段和产物段必须按同一个帧率抽，否则逐帧比较会错位。"""
-        cmd = vmaf.segment_cmd("ffmpeg", Path("in.mkv"), 10.0, 5.0,
-                               Path("out.mkv"), rate="30")
-        self.assertGreater(cmd.index("-r"), cmd.index("-i"))
-        self.assertEqual(cmd[cmd.index("-r") + 1], "30")
+        cmd = self.cmd(10.0, rate="24000/1001")
+        self.assertIn("fps=fps=24000/1001:start_time=0", self.vf(cmd))
+        self.assertNotIn("-r", cmd)
 
     def test_unknown_rate_leaves_ffmpeg_default(self):
-        self.assertNotIn("-r", self.cmd(10.0))
+        cmd = self.cmd(10.0)
+        self.assertNotIn("-r", cmd)
+        self.assertNotIn("-vf", cmd)
 
 
 class SampleWindowNestingTests(unittest.TestCase):

@@ -491,6 +491,114 @@ class IntegrationTests(unittest.TestCase):
             self.assertGreater(rescued, raw_score + 20,
                               "a one-frame offset must be detected and undone")
 
+    def test_n_vfr_low_rate_section_is_measured_on_the_target_grid(self):
+        """混合帧率片源的低帧率段，参考段也必须锚在片头起的 30fps 网格上。
+
+        输入 -ss 会把时间戳归零到切点；如果参考段直接按切点重采样，24.75fps
+        段和 30fps 产物的帧相位就对不上，一个正常产物会被量成 12 分。这里
+        造一个 6 秒 24.75fps + 6 秒 30fps 的片源，第一段正好落在低帧率区。
+        """
+        from vcompress import probe, verify
+
+        tools = Tools({"ffmpeg": "", "ffprobe": ""})
+        filters = subprocess.run([tools.ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True, timeout=60)
+        if "libvmaf" not in filters.stdout:
+            self.skipTest("ffmpeg build has no libvmaf")
+
+        first = self.root / "vfr_a.mp4"
+        second = self.root / "vfr_b.mp4"
+        src = self.root / "vfr.mp4"
+        dist = self.root / "vfr_out.mp4"
+        for out, rate in ((first, "99/4"), (second, "30")):
+            subprocess.run(
+                [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                 "-f", "lavfi", "-i",
+                 f"testsrc2=duration=6:size=320x180:rate={rate}",
+                 "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+                 "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
+                 str(out)],
+                check=True, capture_output=True, timeout=180,
+            )
+        listing = self.root / "vfr_list.txt"
+        listing.write_text(f"file '{first}'\nfile '{second}'\n",
+                           encoding="utf-8")
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "concat", "-safe", "0", "-i", str(listing),
+             "-c", "copy", "-video_track_timescale", "90000", str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(src), "-map", "0:V:0", "-an", "-sn",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+             "-pix_fmt", "yuv420p", "-r", "30", str(dist)],
+            check=True, capture_output=True, timeout=180,
+        )
+
+        info = probe.probe(tools, src)
+        self.assertTrue(info.vfr, "test source must be detected as VFR")
+        self.assertEqual(info.target_rate, "30")
+        cfg = {"verify": {"vmaf_enabled": True, "vmaf_segments": 3,
+                          "vmaf_sample_seconds": 2.0, "vmaf_threshold": 0.0,
+                          "vmaf_min_segment": 0.0}}
+        mean, worst, msg = verify.vmaf_spot_check(
+            tools, src, dist, 12.0202, cfg,
+            fps=info.encode_fps, rate=info.encode_rate)
+        self.assertIsNotNone(mean, msg)
+        self.assertGreater(worst, 90.0,
+                           f"low-rate section measured {worst:.2f}; reference "
+                           f"and output are not on the same CFR grid")
+
+    def test_n2_offset_start_timestamps_are_normalized(self):
+        """源文件起始 PTS 不是 0、且容器 seek 很粗时，抽样仍要落在内容时间上。
+
+        mpegts 的 PTS 常从 1.4s 或更晚开始，快速 seek 还会落到目标之后的
+        关键帧。输入 -ss 会按源起点归一化时间戳，setpts 把粗 seek 偏移加回
+        去；10 秒提前量保证粗 seek 不会跳过整段。旧实现按切点重采样，这种
+        文件会整体错位，正常产物被判成低分。
+        """
+        from vcompress import probe, verify
+
+        tools = Tools({"ffmpeg": "", "ffprobe": ""})
+        filters = subprocess.run([tools.ffmpeg, "-hide_banner", "-filters"],
+                                 capture_output=True, text=True, timeout=60)
+        if "libvmaf" not in filters.stdout:
+            self.skipTest("ffmpeg build has no libvmaf")
+
+        src = self.root / "offset.ts"
+        dist = self.root / "offset_out.mp4"
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-f", "lavfi", "-i",
+             "testsrc2=duration=20:size=320x180:rate=30",
+             "-output_ts_offset", "5",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
+             "-pix_fmt", "yuv420p", "-f", "mpegts", str(src)],
+            check=True, capture_output=True, timeout=180,
+        )
+        subprocess.run(
+            [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+             "-i", str(src), "-map", "0:V:0", "-an", "-sn",
+             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "18",
+             "-pix_fmt", "yuv420p", "-r", "30", str(dist)],
+            check=True, capture_output=True, timeout=180,
+        )
+
+        info = probe.probe(tools, src)
+        self.assertGreater(info.duration, 0)
+        cfg = {"verify": {"vmaf_enabled": True, "vmaf_segments": 3,
+                          "vmaf_sample_seconds": 2.0, "vmaf_threshold": 0.0,
+                          "vmaf_min_segment": 0.0}}
+        mean, worst, msg = verify.vmaf_spot_check(
+            tools, src, dist, info.duration, cfg,
+            fps=info.encode_fps, rate=info.encode_rate)
+        self.assertIsNotNone(mean, msg)
+        self.assertGreater(worst, 90.0,
+                           f"offset source measured {worst:.2f}; the sample "
+                           f"grid or the coarse seek is off")
+
     def test_o_rejected_output_can_be_kept_for_inspection(self):
         cfg = self.root / "keepfail.toml"
         cfg.write_text(
