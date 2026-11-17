@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import adaptive, caps, encode, files, probe, proc, remux, tracks, verify
+from . import adaptive, caps, encode, files, probe, proc, remux, tracks, vmaf, verify
 from .caps import Caps
 from .logfmt import em
 from .progress import ProgressPrinter
@@ -281,7 +281,12 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
             fps=info.encode_fps, rate=info.encode_rate,
         )
         if picked is not None:
+            # 先用 8s 样本挡住明显不值得压的：预演要花十几分钟，不能为一个
+            # 「预计只省 5%」的文件白跑一遍。
+            _reject_unworthy(ctx, info, picked, log_prediction=False)
+            picked = _pilot_adjust(ctx, src, info, enc_cfg, picked)
             crf = picked.crf
+            # 预演可能下调 CRF、也可能给出更准的码率，再用它复核一次收益
             _reject_unworthy(ctx, info, picked)
 
     cmd = encode.build_cmd(
@@ -301,6 +306,71 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
     elapsed = time.monotonic() - t0
     printer(100.0)
     return crf, elapsed, picked
+
+
+def _pilot_adjust(ctx: RunContext, src: Path, info, enc_cfg: dict, picked,
+                  mean_threshold=None, min_segment=None):
+    """全片编码前用抽检窗口预演选中的 CRF，提前发现硬失败。
+
+    搜索只抽 8s，硬场景可能落在窗口之间。日志里有 13 个文件搜索通过、全片
+    编码几个小时后才在校验的 20s 窗口里发现某段崩了；其中一个还重复失败了
+    5 次。预演就是把这些 20s 窗口按选中的 CRF 先编一遍：
+
+    - 过：用预演实测码率替换 8s 样本的码率，收益预估更准；
+    - 不过：下调 0.5 CRF 再试，最多 ``pilot_retries`` 次，仍不过就跳过，
+      不启动一次注定失败的全片编码；
+    - 量不出来：只告警，继续走正式编码，最终校验仍会兜底。环境问题不该
+      在预演阶段把一个文件挡死。
+
+    预演用 ``[verify]`` 的硬闸门（93/90），不要求达到自适应目标 95：目标是
+    ``below_target`` 警告的范围，硬闸门才是「产物能不能交付」的界线。
+
+    预演不是最终校验的替代品：样本从关键帧开始编，和全片编码在某一时刻的
+    GOP 位置不同，可能漏掉只在全片中段出现的编码器问题；最终校验仍是仲裁。
+    """
+    if picked is None or not ctx.cfg["adaptive"].get("pilot_check", False):
+        return picked
+    ad = ctx.cfg["adaptive"]
+    retries = max(0, int(ad.get("pilot_retries", 2)))
+    lo = encode.quantize_crf(to_float(ad.get("crf_min"), 16))
+    crf = picked.crf
+    for attempt in range(retries + 1):
+        try:
+            mean, worst, bitrate, msg = verify.pilot_check(
+                ctx.tools, src, info.duration, enc_cfg, crf, ctx.cfg,
+                log=log, lossless_codec=ctx.lossless_codec,
+                model=verify.vmaf_model(info, ctx.cfg),
+                fps=info.encode_fps, rate=info.encode_rate,
+                mean_threshold=mean_threshold, min_segment=min_segment,
+            )
+        except (encode.EncodeError, vmaf.VmafError, OSError) as e:
+            log.warning(f"[预演] {em(src.name)}：预演量不出来（{e}），"
+                        f"跳过预演，直接正式编码")
+            return picked
+        if mean is None:
+            log.warning(f"[预演] {em(src.name)}：{msg}，跳过预演，"
+                        f"直接正式编码")
+            return picked
+        log.info(f"[预演] {em(src.name)} crf={em(encode.fmt_crf(crf))}："
+                 f"均值 VMAF {em(f'{mean:.2f}')}（最低段 {worst:.2f}）")
+        if not msg:
+            if bitrate > 0:
+                picked = adaptive.CrfChoice(
+                    crf, bitrate, picked.meets_target, picked.worst_vmaf)
+            else:
+                picked = adaptive.CrfChoice(
+                    crf, picked.video_bitrate, picked.meets_target,
+                    picked.worst_vmaf)
+            return picked
+        if attempt >= retries:
+            raise SkipFile(f"全片编码前预演不过：{msg}")
+        lowered = encode.quantize_crf(max(lo, crf - 0.5))
+        if lowered >= crf:
+            raise SkipFile(f"全片编码前预演不过，且已到 crf={lo}：{msg}")
+        log.warning(f"[预演] {em(src.name)}：crf={encode.fmt_crf(crf)} 不过"
+                    f"（{msg}），降到 crf={encode.fmt_crf(lowered)} 再试")
+        crf = lowered
+    return picked
 
 
 def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst,
@@ -336,7 +406,7 @@ def _warn_below_target(ctx: RunContext, src: Path, picked, mean, worst,
     return f"{detail}（目标 {target}，搜索时样本最差 {picked.worst_vmaf:.2f}）"
 
 
-def _reject_unworthy(ctx: RunContext, info, picked) -> None:
+def _reject_unworthy(ctx: RunContext, info, picked, log_prediction: bool = True) -> None:
     """搜索结果已经能回答两个问题，别等几小时后才知道答案。
 
     1. 这个片源根本达不到目标画质吗？达不到就不该压——「视觉无损优先」的前提下，
@@ -356,9 +426,11 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
         return
     saving = 1.0 - predicted / info.size
     floor = float(ctx.cfg["skip"].get("min_saving_ratio", 0.15))
-    log.info(f"[预估] {em(info.path.name)}：crf={em(encode.fmt_crf(picked.crf))}，"
-             f"样本实测 {picked.video_bitrate // 1000} kbps，预计压到 "
-             f"~{fmt_size(predicted)}（省 {em(f'{saving:.1%}')}）")
+    if log_prediction:
+        log.info(f"[预估] {em(info.path.name)}："
+                 f"crf={em(encode.fmt_crf(picked.crf))}，样本实测 "
+                 f"{picked.video_bitrate // 1000} kbps，预计压到 "
+                 f"~{fmt_size(predicted)}（省 {em(f'{saving:.1%}')}）")
     if saving < floor:
         raise SkipFile(
             f"按 crf={encode.fmt_crf(picked.crf)} 的样本码率预计只压到 "
@@ -369,10 +441,11 @@ def _reject_unworthy(ctx: RunContext, info, picked) -> None:
 def _remux_gop(ctx: RunContext, src: Path, info) -> str:
     """重编视频轨收紧关键帧间隔，音轨/字幕/章节原样复制。
 
-    和压缩流程同构但口径不同：画质闸门用 [remux] target_vmaf（更严，二次
-    编码要留代际余量），体积闸门反向（允许涨到 max_growth_ratio），音轨一律
-    复制。搜索失败不回退固定 CRF——压缩模式回退了顶多画质差点，这里回退
-    等于拿一个没量过画质的二次编码去替换原本完好的文件。
+    和压缩流程同构但口径不同：画质闸门用 [remux] target_vmaf（默认与压缩
+    一致，想给二次编码留代际余量可调到 98），体积闸门反向（允许涨到
+    max_growth_ratio），音轨一律复制。搜索失败不回退固定 CRF——压缩模式
+    回退了顶多画质差点，这里回退等于拿一个没量过画质的二次编码去替换原本
+    完好的文件。
     """
     tmp = files.tmp_path(src, ctx.out_ext)
     printer = ProgressPrinter(src.name, ctx.show_progress)
@@ -412,7 +485,6 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
                 f"{picked.worst_vmaf:.2f}，达不到重封装目标 "
                 f"{ctx.cfg['remux']['target_vmaf']}，不动它更安全"
             )
-
         predicted = remux.predicted_size(info, picked.video_bitrate)
         limit = remux.growth_limit(info.size, ctx.cfg)
         if predicted is not None and info.size > 0:
@@ -428,6 +500,21 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
                     f"（比源文件大 {growth:.1%}），超过允许的 "
                     f"{growth_cap:.0%} 上限，不动它"
                 )
+
+        # 预估已经过了涨幅闸门才值得花时间预演；预演可能下调 CRF 让体积
+        # 变大，所以过了预演还要再复核一次上限。
+        remux_target = to_float(ctx.cfg["remux"].get("target_vmaf"), 95.0)
+        picked = _pilot_adjust(
+            ctx, src, info, enc_cfg, picked,
+            mean_threshold=remux_target, min_segment=remux_target)
+        predicted = remux.predicted_size(info, picked.video_bitrate)
+        if predicted is not None and info.size > 0 and predicted > limit:
+            growth = predicted / info.size - 1
+            raise SkipFile(
+                f"预演后按样本码率预计压到 {fmt_size(predicted)}"
+                f"（比源文件大 {growth:.1%}），超过允许的 "
+                f"{growth_cap:.0%} 上限，不动它"
+            )
 
         log.info(f"[重封装] {em(src.name)}：重编收紧关键帧间隔"
                  f"（最多 {gap_s:g}s），crf={em(encode.fmt_crf(picked.crf))}，"
@@ -466,7 +553,7 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
             log.info(f"[校验] {em(src.name)}：VMAF {em(f'{mean:.2f}')}")
         below = _warn_below_target(
             ctx, src, picked, mean, worst,
-            target=to_float(ctx.cfg["remux"].get("target_vmaf"), 98.0),
+            target=to_float(ctx.cfg["remux"].get("target_vmaf"), 95.0),
             label="重封装目标")
 
         _remux_commit(ctx, src, tmp, target, info,

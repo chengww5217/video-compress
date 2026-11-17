@@ -128,6 +128,8 @@ class VideoInfo:
     audio_codecs: list = field(default_factory=list)
     audio_bitrates: list = field(default_factory=list)
     audio_channels: list = field(default_factory=list)
+    # DTS-HD MA / DTS:X 的 codec_name 也是 dts，只有 profile 能区分
+    audio_profiles: list = field(default_factory=list)
     subtitle_codecs: list = field(default_factory=list)
 
     @property
@@ -471,6 +473,22 @@ def _hdr_markers(*side_data_lists) -> list:
     return sorted(found)
 
 
+def primary_video_stream(streams: list) -> dict:
+    """第一条真正的视频流：跳过 mp4 封面图（attached_pic）。
+
+    ``0:V`` / ``0:V:0`` 会把 attached_pic 排除在外，probe 必须用同一条流，
+    否则封面排在前面时拿封面当正片，宽高、帧率、HDR 全错。
+    """
+    for stream in streams or ():
+        if stream.get("codec_type") != "video":
+            continue
+        disposition = stream.get("disposition") or {}
+        if to_int(disposition.get("attached_pic")) == 1:
+            continue
+        return stream
+    return {}
+
+
 def probe(tools: Tools, path: Path,
           vfr_max_drop_ratio: float = 0.05) -> VideoInfo:
     cmd = [
@@ -494,7 +512,7 @@ def probe(tools: Tools, path: Path,
         raise RuntimeError(f"ffprobe 对 {path.name} 返回的 JSON 解析不了：{e}") from e
     fmt = data.get("format", {})
     streams = data.get("streams", [])
-    vstream = next((s for s in streams if s.get("codec_type") == "video"), {})
+    vstream = primary_video_stream(streams)
     astreams = [s for s in streams if s.get("codec_type") == "audio"]
     sstreams = [s for s in streams if s.get("codec_type") == "subtitle"]
 
@@ -531,8 +549,12 @@ def probe(tools: Tools, path: Path,
     info.color_transfer = _color_tag(vstream.get("color_transfer"))
     info.color_space = _color_tag(vstream.get("color_space"))
     info.color_range = _color_tag(vstream.get("color_range"))
+    # 只取主视频流的帧：封面图也可能出现在 frames 里，拿它的 SEI 会把 HDR
+    # 元数据认错。stream_index 缺失时退回第一条视频帧（老构建的兼容路径）。
+    vindex = vstream.get("index")
     vframe = next((f for f in data.get("frames") or []
-                   if f.get("media_type") == "video"), {})
+                   if f.get("media_type") == "video"
+                   and (vindex is None or f.get("stream_index") == vindex)), {})
     info.hdr_metadata = _hdr_markers(vstream.get("side_data_list"),
                                      vframe.get("side_data_list"))
     info.bitrate = _stream_bitrate(vstream)
@@ -545,6 +567,7 @@ def probe(tools: Tools, path: Path,
     info.audio_codecs = [s.get("codec_name", "") for s in astreams]
     info.audio_bitrates = [_stream_bitrate(s) for s in astreams]
     info.audio_channels = [to_int(s.get("channels"), 2) for s in astreams]
+    info.audio_profiles = [str(s.get("profile") or "") for s in astreams]
     info.subtitle_codecs = [s.get("codec_name", "") for s in sstreams]
     return info
 

@@ -217,7 +217,7 @@ class FailureTests(PipelineTestCase):
         self.assertIn("bad params", self.store.last(self.src)["error"])
 
     def test_ordinary_failure_is_not_marked_permanent(self):
-        """画质不过、编码器报错这类下次该重试，不能记成不必重试。"""
+        """量不出 VMAF、编码器报错这类环境问题下次该重试，不能记成不必重试。"""
         self.run_one(self.fake_encode(), verify_ok=False)
         rec = self.store.last(self.src)
         self.assertIsNone(rec["permanent"])
@@ -398,6 +398,107 @@ class PreEncodeRejectTests(PipelineTestCase):
     def test_unknown_bitrate_does_not_block(self):
         """预估不出来时照旧编码，别因为拿不到数就少压文件。"""
         _ctx, outcome = self.run_with_choice(adaptive.CrfChoice(30, 0, True, 96.0))
+        self.assertEqual(outcome, pipeline.OK)
+
+
+class PilotCheckPipelineTests(PipelineTestCase):
+    """预演不过就降 CRF 或跳过，不启动一个注定失败的全片编码。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["adaptive"]["enabled"] = True
+        self.cfg["adaptive"]["pilot_check"] = True
+        self.cfg["adaptive"]["pilot_retries"] = 2
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              audio_codecs=[], audio_bitrates=[],
+                              audio_channels=[])
+
+    def run_with(self, choice, pilot):
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(self.fake_encode())
+        with p1, p2, p3, \
+                mock.patch.object(pipeline.adaptive, "pick_crf",
+                                  return_value=choice), \
+                mock.patch.object(pipeline.verify, "pilot_check",
+                                  side_effect=pilot):
+            return ctx, pipeline.process_file(ctx, self.src)
+
+    def test_passing_pilot_proceeds(self):
+        choice = adaptive.CrfChoice(30, 400, True, 96.0)
+        calls = []
+
+        def pilot(*a, **kw):
+            calls.append(kw)
+            return 95.0, 94.0, 400, ""
+
+        _ctx, outcome = self.run_with(choice, pilot)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(len(calls), 1)
+        rec = self.store.last(self.src)
+        self.assertEqual(rec["crf"], 30)
+        self.assertEqual((self.root / "a.av1.mkv").read_bytes(), self.encoded)
+
+    def test_pilot_bitrate_can_still_reject_a_marginal_file(self):
+        """8s 样本说能省 50%，20s 预演说只省 12.5%——按预演的数skip。"""
+        choice = adaptive.CrfChoice(30, 400, True, 96.0)
+
+        def pilot(*a, **kw):
+            return 95.0, 94.0, 700, ""
+
+        _ctx, outcome = self.run_with(choice, pilot)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertIn("低于要求的", self.store.last(self.src)["reason"])
+        self.assertFalse((self.root / "a.av1.mkv").exists())
+
+    def test_failing_pilot_lowers_crf_and_retries(self):
+        choice = adaptive.CrfChoice(30, 300, True, 96.0)
+        seen = []
+
+        def pilot(*a, **kw):
+            crf = a[4]
+            seen.append(crf)
+            if len(seen) == 1:
+                return 89.0, 88.0, 300, "最低段 88"
+            return 95.0, 94.0, 400, ""
+
+        _ctx, outcome = self.run_with(choice, pilot)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(seen, [30, 29.5])
+        self.assertEqual(self.store.last(self.src)["crf"], 29.5)
+
+    def test_failing_pilot_is_skipped_without_full_encode(self):
+        choice = adaptive.CrfChoice(30, 300, True, 96.0)
+        encoded = []
+
+        def pilot(*a, **kw):
+            return 89.0, 88.0, 300, "最低段 88"
+
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(self.fake_encode())
+
+        def counting_run(cmd, duration, cb=None):
+            encoded.append(cmd)
+            Path(cmd[-1]).write_bytes(self.encoded)
+
+        with p1, p2, p3, \
+                mock.patch.object(pipeline.adaptive, "pick_crf",
+                                  return_value=choice), \
+                mock.patch.object(pipeline.verify, "pilot_check",
+                                  side_effect=pilot), \
+                mock.patch.object(pipeline.encode, "run_encode", counting_run):
+            outcome = pipeline.process_file(ctx, self.src)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertEqual(encoded, [], "预演不过不能启动全片编码")
+        self.assertTrue(self.src.exists())
+        self.assertIn("预演不过", self.store.last(self.src)["reason"])
+
+    def test_unmeasurable_pilot_does_not_block(self):
+        choice = adaptive.CrfChoice(30, 400, True, 96.0)
+
+        def pilot(*a, **kw):
+            return None, None, 0, "抽取样本片段失败"
+
+        _ctx, outcome = self.run_with(choice, pilot)
         self.assertEqual(outcome, pipeline.OK)
 
 

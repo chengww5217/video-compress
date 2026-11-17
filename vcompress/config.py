@@ -78,6 +78,12 @@ DEFAULTS = {
         "sample_count": 5,
         "search_step": 0.25,
         "require_target": True,
+        # 编码前用 [verify] 的抽检窗口（默认 5 段 × 20s）把选中的 CRF 预演一遍。
+        # 搜索只抽 8s，硬场景可能刚好落在窗口外：日志里 13 个 VMAF 单段失败都是
+        # 搜索过了、全片编码几小时之后才在校验里发现。预演不过就下调 CRF 重试，
+        # 再不过就跳过，不白烧一次全片编码。默认关，config.toml 里开着。
+        "pilot_check": False,
+        "pilot_retries": 2,
     },
     "audio": {
         "transcode_over_kbps": 512,
@@ -89,8 +95,9 @@ DEFAULTS = {
         # 重封装模式（--remux）：「不用再压」的文件不做检测，一律按配置的
         # 编码器重编视频轨，关键帧间隔收紧到 max_keyframe_gap_s 以内
         "max_keyframe_gap_s": 5.0,
-        # GOP 重编的画质闸门：比压缩的 95 更严——二次编码的代际损失要留余量
-        "target_vmaf": 98.0,
+        # GOP 重编的画质闸门：默认与压缩目标一致；二次编码有代际损失，
+        # 想多留余量可调到 98，代价是重封装产物体积更大
+        "target_vmaf": 95.0,
         # 允许体积最多增长多少：关键帧不免费，多出来的就是修快进的代价
         "max_growth_ratio": 0.10,
     },
@@ -279,6 +286,8 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[adaptive] sample_seconds 必须是正数")
     if int(ad["sample_count"]) < 1:
         errors.append("[adaptive] sample_count 至少是 1")
+    if int(ad["pilot_retries"]) < 0:
+        errors.append("[adaptive] pilot_retries 不能是负数")
     if float(ad["search_step"]) < 0.25:
         errors.append("[adaptive] search_step 至少是 0.25"
                       "（CRF 的实际可用粒度）")
@@ -294,6 +303,11 @@ def _check_semantics(cfg: dict, errors: list):
                       "单段下限是用来抓某一段崩掉的，不该比均值门槛还严")
     if int(vf["vmaf_segments"]) < 1:
         errors.append("[verify] vmaf_segments 至少是 1")
+    if int(ad["sample_count"]) != int(vf["vmaf_segments"]):
+        errors.append(
+            "[adaptive] sample_count 必须等于 [verify] vmaf_segments："
+            "两边段数不同，搜索和抽检的窗口就可能完全错开，"
+            "搜索说达标、全片抽检却不及格")
     if float(vf["vmaf_sample_seconds"]) <= 0:
         errors.append("[verify] vmaf_sample_seconds 必须是正数")
     if float(vf["max_duration_diff_s"]) < 0:

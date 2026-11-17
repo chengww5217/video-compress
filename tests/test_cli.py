@@ -298,7 +298,8 @@ class MainEarlyExitTests(unittest.TestCase):
         cli.main([str(self.root), "--config", str(p)])
         target = self.root / "scratch" / "here"
         self.assertTrue(target.is_dir())
-        self.assertEqual(scratch.get_dir(), target)
+        # macOS 的 /var 是 /private/var 的符号链接；比较规范化后的路径
+        self.assertEqual(scratch.get_dir().resolve(), target.resolve())
 
     def test_empty_temp_dir_means_system_default(self):
         p = self.write_cfg('temp_dir = ""\n')

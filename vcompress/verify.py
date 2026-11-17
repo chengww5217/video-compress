@@ -12,7 +12,7 @@ import re
 from collections import Counter
 from pathlib import Path
 
-from . import proc, scratch, vmaf
+from . import encode, proc, scratch, vmaf
 from .logfmt import em
 from .util import fmt_size, fmt_size_change, to_float, to_int
 
@@ -44,9 +44,9 @@ class VerifyError(RuntimeError):
 class PermanentVerifyError(VerifyError):
     """结论由片源和配置决定的校验失败：重跑必然一样，不值得再花几小时。
 
-    只有「换个时间、换台机器，只要片源和配置没变就一定同样结论」的判定配用它，
-    目前只有体积与实际收益。磁盘满、被 OOM 杀掉、量不出 VMAF 这类是环境问题，
-    换个时间重试是有意义的，绝不能归到这里。
+    只有「换个时间、换台机器，只要片源和配置没变就一定同样结论」的判定配用它：
+    体积/实际收益，以及已经量出分数但低于阈值的 VMAF 抽检。磁盘满、被 OOM
+    杀掉、量不出 VMAF 这类是环境问题，换个时间重试是有意义的，绝不能归到这里。
 
     色彩/HDR 元数据带不过来也故意不算：那是 ffmpeg 构建的能力问题，换个构建就
     好了，不该让文件被永久挡住。
@@ -426,6 +426,79 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
     return mean, worst, ""
 
 
+def pilot_check(tools, src: Path, duration: float, enc_cfg: dict, crf: float,
+                cfg, log=None, lossless_codec: str = "libx264",
+                model: str = "", fps: float = 0.0, rate: str = "",
+                mean_threshold: float = None, min_segment: float = None):
+    """全片编码前，用抽检窗口把选中的 CRF 预演一遍。
+
+    搜索只抽 8s 窗口，硬场景可能刚好落在窗口之间；日志里多个文件都是搜索
+    通过、全片编码几小时后才在 20s 抽检里发现某段崩了。这里直接把产物侧的
+    抽检窗口按选中的 CRF 编一遍，提前发现同样的失败，避免白烧一次全片编码。
+
+    返回 ``(均值, 最低段, 视频码率, 失败原因)``。量不出来时前两个是 None，
+    调用方应当只告警并继续（最终校验仍会兜底），不要把环境问题当成片源结论。
+    ``mean_threshold``/``min_segment`` 不给时用 ``[verify]`` 的硬闸门；重封装
+    模式会传 ``[remux] target_vmaf``（默认与压缩目标一致）。
+
+    注意：样本从关键帧开始编码，和全片编码在某一时刻的 GOP 位置不同，预演
+    通过不等于最终校验一定通过；它只负责把「内容本身在某段就撑不住」这类
+    问题提前暴露出来，最终校验仍是仲裁。
+    """
+    vcfg = cfg["verify"]
+    segments = max(1, to_int(vcfg.get("vmaf_segments"), 5))
+    seconds = to_float(vcfg.get("vmaf_sample_seconds"), 20.0)
+    threshold = (to_float(vcfg.get("vmaf_threshold"), 93.0)
+                 if mean_threshold is None else float(mean_threshold))
+    floor = (to_float(vcfg.get("vmaf_min_segment"), 90.0)
+             if min_segment is None else float(min_segment))
+    if seconds <= 0:
+        seconds = 20.0
+    if duration <= 0:
+        return None, None, 0, "不知道时长，选不了抽样点"
+
+    starts = vmaf.sample_starts(duration, seconds, segments, fps=fps)
+    span = min(seconds, duration)
+    records = []
+    total_bytes = 0
+    with scratch.temp_dir(prefix="vcpilot_") as td:
+        root = Path(td)
+        for i, start in enumerate(starts):
+            ref = root / f"ref{i}.mkv"
+            dist = root / f"dist{i}.mkv"
+            if log:
+                log.info(f"[预演] 第 {i + 1}/{len(starts)} 段（crf="
+                         f"{encode.fmt_crf(crf)}）")
+            vmaf.extract_segment(tools.ffmpeg, src, start, span, ref,
+                                 lossless_codec, rate=rate)
+            try:
+                encode.encode_sample(tools.ffmpeg, ref, crf, enc_cfg, dist)
+                total_bytes += dist.stat().st_size
+                score = _score_segment(tools, ref, dist, threshold, i + 1,
+                                       start, log, model)
+            finally:
+                dist.unlink(missing_ok=True)
+            if log:
+                log.debug(f"[预演] 第 {i + 1} 段（{start:.1f}s 处）VMAF "
+                          f"{score:.2f}")
+            records.append((start, score))
+    mean = sum(s for _t, s in records) / len(records)
+    worst_t, worst = min(records, key=lambda r: r[1])
+    bitrate = int(total_bytes * 8 / (span * len(records))) \
+        if span > 0 and records else 0
+    if floor > 0 and worst < floor:
+        return mean, worst, bitrate, (
+            f"{worst_t:.0f}s 处那段只有 VMAF {worst:.2f}，低于单段下限 "
+            f"{floor}（各段：{_fmt_segments(records)}）"
+        )
+    if mean < threshold:
+        return mean, worst, bitrate, (
+            f"VMAF 均值 {mean:.2f} 低于阈值 {threshold}"
+            f"（各段：{_fmt_segments(records)}）"
+        )
+    return mean, worst, bitrate, ""
+
+
 def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             log=None, lossless_codec: str = "libx264",
             vmaf_available: bool = True, max_growth_ratio: float = 0.0):
@@ -444,8 +517,9 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
     就能下，没有理由先花十几分钟解码。实际踩过一次，一个 AV1 产物比 h264 源还
     大，判它出局之前先白解了一遍全片。
 
-    体积/收益那一项抛 PermanentVerifyError：同样的片源和配置重跑必然同样结论，
-    调用方据此让它下次直接跳过，而不是再烧几小时得到同一个答案。
+    体积/收益和「分数量出来了但没达标」都抛 PermanentVerifyError：同样的片源
+    和配置重跑必然同样结论，调用方据此让它下次直接跳过，而不是再烧几小时得到
+    同一个答案。只有量不出分数（环境问题）才按普通失败重试。
 
     `vmaf_available` 是构建能力（caps 里有没有 libvmaf 滤镜），由调用方给。
     `max_growth_ratio` > 0 时体积闸门换成重封装口径：不要求变小，只要求
@@ -497,5 +571,8 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             log.warning(f"{em(src.name)}：这个 ffmpeg 构建没有 libvmaf，"
                         f"量不了画质（{msg}），其余检查已通过，继续")
     elif msg:
-        raise VerifyError(msg)
+        # 分数已经量出来了，只是没达标：结论由片源和配置决定，重跑必然还是
+        # 同一个数。日志里一个文件因此反复重试了 5 次、每次白编一两个小时。
+        # 「量不出 VMAF」走的是上面 mean is None 的分支，仍然按环境问题重试。
+        raise PermanentVerifyError(msg)
     return mean, worst

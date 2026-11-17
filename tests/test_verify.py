@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import logging
 import tempfile
 import unittest
 from collections import Counter
@@ -9,7 +10,7 @@ from pathlib import Path
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress import verify, vmaf
+from vcompress import encode, verify, vmaf
 from vcompress.verify import (check_basic, check_color, check_size,
                              count_decode_errors)
 
@@ -510,12 +511,16 @@ class RunAllTests(unittest.TestCase):
             self.run_all()
         self.assertNotIsInstance(cm.exception, verify.PermanentVerifyError)
 
-    def test_low_vmaf_stays_retryable(self):
-        """画质不过也不算永久：换个 target/编码器重跑是有意义的。"""
+    def test_low_vmaf_is_permanent(self):
+        """分数量出来了、只是没达标：片源和配置没变，重跑还是同一个数。
+
+        日志里一个文件因此反复失败了 5 次、每次白编一两个小时。真正量不出
+        分数（环境问题）才走上面 mean is None 的分支按普通失败重试。
+        """
         self.spot = (70.0, 68.0, "vmaf mean 70.00 below threshold 93.0")
-        with self.assertRaises(verify.VerifyError) as cm:
+        with self.assertRaises(verify.PermanentVerifyError) as cm:
             self.run_all()
-        self.assertNotIsInstance(cm.exception, verify.PermanentVerifyError)
+        self.assertIn("below threshold", str(cm.exception))
 
     def test_color_metadata_loss_stops_before_vmaf(self):
         self.orig.color_transfer = "smpte2084"
@@ -550,6 +555,90 @@ class RunAllTests(unittest.TestCase):
     def test_disabled_vmaf_passes(self):
         self.spot = (None, None, "")
         self.assertEqual(self.run_all(), (None, None))
+
+
+class PilotCheckTests(unittest.TestCase):
+    """编码前预演：用抽检窗口把选中的 CRF 先编一遍。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+        self.cfg["verify"]["vmaf_segments"] = 2
+        self.cfg["verify"]["vmaf_sample_seconds"] = 5
+        self.scores = [96.0, 94.0]
+        self.extracted = []
+        self.encoded = []
+        self.orig_extract = vmaf.extract_segment
+        self.orig_encode = encode.encode_sample
+        self.orig_score = vmaf.measure
+        vmaf.extract_segment = self.fake_extract
+        encode.encode_sample = self.fake_encode
+        vmaf.measure = self.fake_score
+        self.log = logging.getLogger("pilot-test")
+        self.log.addHandler(logging.NullHandler())
+
+    def tearDown(self):
+        vmaf.extract_segment = self.orig_extract
+        encode.encode_sample = self.orig_encode
+        vmaf.measure = self.orig_score
+
+    def fake_extract(self, ff, src, start, seconds, out, codec="libx264",
+                     **kw):
+        self.extracted.append((Path(src).name, round(start, 3)))
+        Path(out).write_bytes(b"ref")
+
+    def fake_encode(self, ff, ref, crf, cfg, out):
+        self.encoded.append((Path(ref).name, round(crf, 2)))
+        Path(out).write_bytes(b"x" * 1000)
+
+    def fake_score(self, ff, dist, ref, shift=0, **kw):
+        return self.scores[len(self.encoded) - 1]
+
+    def check(self, **kw):
+        return verify.pilot_check(
+            helpers.FakeTools(), Path("a.mkv"), 600.0,
+            self.cfg["encode"]["av1"], 30.0, self.cfg, log=self.log, **kw)
+
+    def test_pass_reports_mean_worst_and_bitrate(self):
+        mean, worst, bitrate, msg = self.check()
+        self.assertAlmostEqual(mean, 95.0)
+        self.assertAlmostEqual(worst, 94.0)
+        self.assertEqual(bitrate, 1600)  # 2 × 1000 字节 / (2 段 × 5s) × 8
+        self.assertEqual(msg, "")
+        self.assertEqual(len(self.extracted), 2, "每段一条参考片段")
+        self.assertEqual([crf for _name, crf in self.encoded], [30.0, 30.0])
+
+    def test_bad_segment_reports_failure(self):
+        self.scores = [99.0, 80.0]
+        _mean, worst, _bitrate, msg = self.check()
+        self.assertAlmostEqual(worst, 80.0)
+        self.assertIn("低于单段下限", msg)
+        self.assertIn("80.00", msg)
+
+    def test_threshold_can_be_overridden_for_remux(self):
+        self.scores = [97.0, 97.0]
+        mean, worst, _bitrate, msg = self.check(mean_threshold=98.0,
+                                                min_segment=98.0)
+        self.assertAlmostEqual(mean, 97.0)
+        self.assertAlmostEqual(worst, 97.0)
+        self.assertIn("低于单段下限 98.0", msg)
+
+    def test_unknown_duration_is_not_measured(self):
+        mean, worst, bitrate, msg = verify.pilot_check(
+            helpers.FakeTools(), Path("a.mkv"), 0.0,
+            self.cfg["encode"]["av1"], 30.0, self.cfg, log=self.log)
+        self.assertIsNone(mean)
+        self.assertIsNone(worst)
+        self.assertEqual(bitrate, 0)
+        self.assertIn("时长", msg)
+        self.assertEqual(self.extracted, [])
+
+    def test_encode_failure_propagates_to_the_caller(self):
+        def boom(*a, **kw):
+            raise encode.EncodeError("sample encode failed")
+
+        encode.encode_sample = boom
+        with self.assertRaises(encode.EncodeError):
+            self.check()
 
 
 class VmafModelSelectionTests(unittest.TestCase):

@@ -72,6 +72,32 @@ class RotationTests(unittest.TestCase):
                          (1088, 1920))
 
 
+class PrimaryVideoStreamTests(unittest.TestCase):
+    """probe 必须和 -map 0:V:0 取同一条流：封面图（attached_pic）不算正片。"""
+
+    def test_attached_picture_is_skipped(self):
+        streams = [
+            {"index": 0, "codec_type": "video", "disposition": {"attached_pic": 1}},
+            {"index": 1, "codec_type": "video", "disposition": {"attached_pic": 0}},
+        ]
+        self.assertEqual(probe.primary_video_stream(streams)["index"], 1)
+
+    def test_first_real_video_is_used(self):
+        streams = [
+            {"index": 0, "codec_type": "audio"},
+            {"index": 1, "codec_type": "video", "disposition": {}},
+            {"index": 2, "codec_type": "video", "disposition": {}},
+        ]
+        self.assertEqual(probe.primary_video_stream(streams)["index"], 1)
+
+    def test_no_real_video_returns_empty(self):
+        streams = [
+            {"index": 0, "codec_type": "video", "disposition": {"attached_pic": 1}},
+        ]
+        self.assertEqual(probe.primary_video_stream(streams), {})
+        self.assertEqual(probe.primary_video_stream([]), {})
+
+
 class ParseHelperTests(unittest.TestCase):
     def test_parse_fps_fraction(self):
         self.assertAlmostEqual(_parse_fps("30000/1001"), 29.97, places=2)

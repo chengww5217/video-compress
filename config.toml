@@ -73,6 +73,12 @@ sample_seconds = 8     # 每段样本多长（比抽检的 20s 短，窗口嵌�
 sample_count = 5       # 从整片均匀抽几段（取最差段决策）；要和 vmaf_segments 一致
 search_step = 0.25     # 搜索粒度；1 级 CRF ≈ 8% 体积，只搜整数平均白扔 4%
 require_target = true  # 连 crf_min 都达不到 target 的片源直接跳过
+# 全片编码前用抽检窗口预演选中的 CRF：不过就下调 0.5 再试，最多 pilot_retries 次；
+# 仍不过就跳过，不启动一次注定校验失败的全片编码。默认关：预演要额外编 5 段 × 20s，
+# 而且样本从关键帧开始，和全片编码的 GOP 位置不同，不能替代最终校验；想提前拦内容级
+# 失败再打开。
+pilot_check = false
+pilot_retries = 2
 
 [audio]
 transcode_over_kbps = 512  # 有损轨码率超过这个值才转 Opus，否则原样复制
@@ -84,7 +90,7 @@ lossless = "flac"          # 无损轨：flac 保持数学无损 / opus 体积�
 # 画质按 target_vmaf 闸门控制，达不到就不动；体积允许小涨——关键帧不免费。
 [remux]
 max_keyframe_gap_s = 5.0   # 重编后的关键帧间隔上限（秒），keyint = 帧率 × 它
-target_vmaf = 95.0         # GOP 重编的画质闸门（与压缩目标一致；想留代际余量可调回 98）
+target_vmaf = 95.0         # GOP 重编的画质闸门（默认与压缩一致；想留代际余量可调到 98）
 max_growth_ratio = 0.10    # 允许体积最多增长 10%
 
 # 校验：任何一项不过都保留原文件。顺序是先便宜后昂贵，VMAF 抽检放最后。

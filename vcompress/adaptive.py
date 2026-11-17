@@ -13,23 +13,6 @@ from .logfmt import em
 from .util import fmt_size, to_float, to_int
 
 
-def _encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
-                   out: Path):
-    """把一段参考片段按给定 CRF 编一遍，用来量分数和称体积。"""
-    cmd = [
-        ffmpeg, "-hide_banner", "-nostats", "-y",
-        "-i", str(ref),
-        *encode.video_args(encoder_cfg, crf),
-        "-an",
-        str(out),
-    ]
-    rc, _out, err = proc.run_managed(cmd)
-    if rc != 0:
-        raise encode.EncodeError(
-            f"sample encode failed at crf={encode.fmt_crf(crf)}: "
-            f"{proc.error_tail(err)}")
-
-
 @dataclass(frozen=True)
 class CrfChoice:
     """自适应搜索的结论。
@@ -58,7 +41,7 @@ def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
     for i, ref in enumerate(refs):
         sample = root / f"s{tag}_{i}.mkv"
         try:
-            _encode_sample(tools.ffmpeg, ref, crf, enc_cfg, sample)
+            encode.encode_sample(tools.ffmpeg, ref, crf, enc_cfg, sample)
             size = sample.stat().st_size
             score = vmaf.measure(tools.ffmpeg, sample, ref, model=model, log=log)
         finally:

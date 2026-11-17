@@ -101,6 +101,23 @@ def video_args(encoder_cfg: dict, crf) -> list:
     return args
 
 
+def encode_sample(ffmpeg: str, ref: Path, crf: float, encoder_cfg: dict,
+                  out: Path) -> None:
+    """把一个参考片段按给定 CRF 编一遍，用来量分数/称体积/做编码前预演。"""
+    cmd = [
+        ffmpeg, "-hide_banner", "-nostats", "-y",
+        "-i", str(ref),
+        *video_args(encoder_cfg, crf),
+        "-an",
+        str(out),
+    ]
+    rc, _out, err = proc.run_managed(cmd)
+    if rc != 0:
+        raise EncodeError(
+            f"sample encode failed at crf={fmt_crf(crf)}: "
+            f"{proc.error_tail(err)}")
+
+
 def merge_comment(original: str, marker: str) -> str:
     """把标记追加到原有 comment 后面，而不是把人家的注释盖掉。
 
@@ -136,7 +153,9 @@ def color_args(info) -> list:
 
 def container_maps_and_tail(container: str) -> tuple:
     """按目标容器决定流映射与收尾参数，返回 (maps, tail)。"""
-    maps = ["-map", "0:V", "-map", "0:a?", "-map", "0:s?"]
+    # 只编第一条非封面视频流：VMAF 抽样用 0:V:0，probe 也只读这一条。
+    # 以前用 0:V 会把多视频流文件的所有视频轨都编进去，产物校验却只看第一轨。
+    maps = ["-map", "0:V:0", "-map", "0:a?", "-map", "0:s?"]
     tail = []
     if container in MKV_LIKE:
         # 附件只有 matroska 支持；data 流（如 mp4 的 tmcd 时间码）装不进去，

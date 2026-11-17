@@ -49,9 +49,9 @@ class ProbeCrfTests(unittest.TestCase):
         self.root = Path(self.tmp.name)
         self.refs = [self.root / f"ref{i}.mkv" for i in range(3)]
         self.encoded = []
-        self.orig_encode = adaptive._encode_sample
+        self.orig_encode = encode.encode_sample
         self.orig_score = vmaf.measure
-        adaptive._encode_sample = self.fake_encode
+        encode.encode_sample = self.fake_encode
         vmaf.measure = self.fake_score
         self.log = logging.getLogger("probe-crf-test")
         self.log.addHandler(logging.NullHandler())
@@ -61,7 +61,7 @@ class ProbeCrfTests(unittest.TestCase):
         Path(out).write_bytes(b"x" * 1000)
 
     def tearDown(self):
-        adaptive._encode_sample = self.orig_encode
+        encode.encode_sample = self.orig_encode
         vmaf.measure = self.orig_score
         self.tmp.cleanup()
 
@@ -129,10 +129,10 @@ class PickCrfMarginTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.orig_encode = adaptive._encode_sample
+        self.orig_encode = encode.encode_sample
         self.orig_score = vmaf.measure
         self.orig_extract = vmaf.extract_segment
-        adaptive._encode_sample = self.fake_encode
+        encode.encode_sample = self.fake_encode
         vmaf.measure = self.fake_score
         vmaf.extract_segment = self.fake_extract
         self.last_crf = None
@@ -140,7 +140,7 @@ class PickCrfMarginTests(unittest.TestCase):
         self.log.addHandler(logging.NullHandler())
 
     def tearDown(self):
-        adaptive._encode_sample = self.orig_encode
+        encode.encode_sample = self.orig_encode
         vmaf.measure = self.orig_score
         vmaf.extract_segment = self.orig_extract
         self.tmp.cleanup()
@@ -189,15 +189,15 @@ class CancelDuringSearchTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.root = Path(self.tmp.name)
-        self.orig_encode = adaptive._encode_sample
+        self.orig_encode = encode.encode_sample
         self.orig_extract = vmaf.extract_segment
-        adaptive._encode_sample = self.cancel_then_fail
+        encode.encode_sample = self.cancel_then_fail
         vmaf.extract_segment = self.fake_extract
         self.log = logging.getLogger("cancel-search-test")
         self.log.addHandler(logging.NullHandler())
 
     def tearDown(self):
-        adaptive._encode_sample = self.orig_encode
+        encode.encode_sample = self.orig_encode
         vmaf.extract_segment = self.orig_extract
         proc.clear_cancel()
         self.tmp.cleanup()
@@ -219,12 +219,12 @@ class CancelDuringSearchTests(unittest.TestCase):
 
     def test_plain_failure_still_falls_back(self):
         """没有取消的普通失败仍然回退固定 CRF——那个行为是对的。"""
-        adaptive._encode_sample = self.orig_encode
+        encode.encode_sample = self.orig_encode
 
         def just_fail(ff, ref, crf, cfg, out):
             raise encode.EncodeError("something else broke")
 
-        adaptive._encode_sample = just_fail
+        encode.encode_sample = just_fail
         cfg = make_cfg()
         self.assertIsNone(
             adaptive.pick_crf(helpers.FakeTools(), self.root / "a.mp4", 600.0,
@@ -251,14 +251,14 @@ class SampleCommandTests(unittest.TestCase):
                              "Conversion failed!")
 
     def test_nostats_is_passed(self):
-        adaptive._encode_sample("ffmpeg", Path("ref.mkv"), 30,
+        encode.encode_sample("ffmpeg", Path("ref.mkv"), 30,
                                 make_cfg()["encode"]["av1"], Path("out.mkv"))
         self.assertIn("-nostats", self.cmds[0])
 
     def test_failure_message_keeps_the_real_cause(self):
         self.rc = 1
         with self.assertRaises(encode.EncodeError) as cm:
-            adaptive._encode_sample("ffmpeg", Path("ref.mkv"), 30,
+            encode.encode_sample("ffmpeg", Path("ref.mkv"), 30,
                                     make_cfg()["encode"]["av1"],
                                     Path("out.mkv"))
         self.assertIn("No space left on device", str(cm.exception))
@@ -285,7 +285,7 @@ class PickCrfFrameRateTests(unittest.TestCase):
 
         with mock.patch.object(vmaf, "sample_starts", starts), \
                 mock.patch.object(vmaf, "extract_segment", extract), \
-                mock.patch.object(adaptive, "_encode_sample",
+                mock.patch.object(encode, "encode_sample",
                                   side_effect=fake_encode_sample), \
                 mock.patch.object(vmaf, "measure", score):
             adaptive.pick_crf(helpers.FakeTools(), Path("a.mp4"), 600.0,

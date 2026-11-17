@@ -483,7 +483,7 @@ class RemuxCacheTests(RemuxPipelineTestCase):
 
     def test_gate_skips_are_still_cached(self):
         """画质/体积闸门的结论和体检无关，重跑也一样，照旧缓存。"""
-        for reason in ("连 crf=16 都只有 VMAF 90.00，达不到重封装目标 98.0",
+        for reason in ("连 crf=16 都只有 VMAF 90.00，达不到重封装目标 95.0",
                        "容器开销超限"):  # 只是「容器」开头，不是旧体检原话
             self.store.add("skipped", self.info, reason=reason, mode="remux")
             self.assertIsNotNone(self.store.is_cached(self.src, "remux"),

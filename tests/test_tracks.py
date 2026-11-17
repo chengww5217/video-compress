@@ -37,6 +37,24 @@ class AudioArgsTests(unittest.TestCase):
             self.assertEqual(args, ["-c:a:0", "flac",
                                     "-compression_level:a:0", "12"], codec)
 
+    def test_dts_hd_ma_is_lossless_despite_the_codec_name(self):
+        """DTS-HD MA 的 codec_name 也是 dts，只能看 profile。"""
+        self.assertTrue(tracks.is_lossless_audio("dts", "DTS-HD MA"))
+        self.assertTrue(tracks.is_lossless_audio("dts", "DTS:X"))
+        self.assertFalse(tracks.is_lossless_audio("dts", "DTS"))
+        self.assertFalse(tracks.is_lossless_audio("dts", "DTS-HD HRA"))
+        info = make_info(audio_codecs=["dts"], audio_bitrates=[4_000_000],
+                         audio_channels=[6], audio_profiles=["DTS-HD MA"])
+        args = tracks.audio_args(info, self.cfg)
+        self.assertEqual(args, ["-c:a:0", "flac",
+                                "-compression_level:a:0", "12"])
+
+    def test_dts_core_still_goes_to_opus(self):
+        info = make_info(audio_codecs=["dts"], audio_bitrates=[1_500_000],
+                         audio_channels=[6], audio_profiles=["DTS"])
+        args = tracks.audio_args(info, self.cfg)
+        self.assertEqual(args[:4], ["-c:a:0", "libopus", "-b:a:0", "480k"])
+
     def test_existing_flac_is_copied_not_reencoded(self):
         info = make_info(audio_codecs=["flac"], audio_bitrates=[900_000],
                          audio_channels=[2])

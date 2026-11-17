@@ -10,11 +10,25 @@ MP4_LIKE = {".mp4", ".m4v", ".mov"}
 # -------------------------------------------------------------------------- 音频
 
 LOSSLESS_AUDIO = ("pcm_", "flac", "alac", "ape", "wavpack", "truehd", "mlp")
+# DTS-HD MA / DTS:X 在 ffprobe 里的 codec_name 也是 dts，只能靠 profile 认。
+# 不认出来的话无损轨会被当普通有损轨转 Opus，和「无损转 FLAC」的承诺冲突。
+DTS_LOSSLESS_PROFILES = ("dts-hd ma", "dts-hd master audio", "dts:x", "dts-x")
 OPUS_MIN_KBPS = 48
 OPUS_MAX_KBPS = 510
 # libopus 只认这几种规范布局，5.1(side) 这类变体会让编码器打不开
 OPUS_LAYOUTS = {1: "mono", 2: "stereo", 3: "3.0", 4: "quad",
                 5: "5.0", 6: "5.1", 7: "6.1", 8: "7.1"}
+
+
+def is_lossless_audio(codec: str, profile: str = "") -> bool:
+    """这条音轨是否无损；DTS-HD MA / DTS:X 要看 profile 而不是 codec_name。"""
+    codec = (codec or "").lower()
+    if codec.startswith(LOSSLESS_AUDIO):
+        return True
+    if codec != "dts":
+        return False
+    profile = (profile or "").lower()
+    return any(marker in profile for marker in DTS_LOSSLESS_PROFILES)
 
 
 def opus_bitrate(base_kbps: int, channels: int) -> int:
@@ -67,11 +81,13 @@ def audio_plan(info, cfg, container: str = ".mkv") -> list:
     if (container or "").lower() not in MKV_LIKE:
         mode = "opus"
     plan = []
+    profiles = getattr(info, "audio_profiles", None) or []
     for i, codec in enumerate(info.audio_codecs):
         codec = (codec or "").lower()
         br = info.audio_bitrates[i] if i < len(info.audio_bitrates) else 0
         ch = info.audio_channels[i] if i < len(info.audio_channels) else 2
-        if codec.startswith(LOSSLESS_AUDIO):
+        profile = profiles[i] if i < len(profiles) else ""
+        if is_lossless_audio(codec, profile):
             if mode != "flac":
                 plan.append(("opus", opus_bitrate(base_kbps, ch) * 1000))
             elif codec == "flac":

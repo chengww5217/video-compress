@@ -127,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--remux", action="store_true",
                     help="重封装模式：「不用再压」的文件不做检测，一律按配置的"
                          "编码器重编视频轨，关键帧间隔收紧到 [remux] "
-                         "max_keyframe_gap_s 以内（画质按更严的 target_vmaf "
+                         "max_keyframe_gap_s 以内（画质按 [remux] target_vmaf "
                          "控制、体积允许小涨，达不到就不动）；该压的照常压缩，"
                          "同样收紧关键帧间隔")
     ap.add_argument("--recycle", action="store_true",

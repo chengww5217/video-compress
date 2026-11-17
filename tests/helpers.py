@@ -52,6 +52,7 @@ def make_info(**kw):
         audio_codecs=["aac"],
         audio_bitrates=[192_000],
         audio_channels=[2],
+        audio_profiles=[""],
         subtitle_codecs=[],
     )
     base.update(kw)

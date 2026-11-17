@@ -209,6 +209,12 @@ class ValidationTests(unittest.TestCase):
         cfg = config.normalise({"adaptive": {"target_vmaf": 95}})
         self.assertEqual(cfg["adaptive"]["target_vmaf"], 95)
 
+    def test_segment_counts_must_match(self):
+        """搜索和抽检段数不同，窗口就可能完全错开，等于两把尺子。"""
+        self.assert_rejected(
+            {"adaptive": {"sample_count": 4}, "verify": {"vmaf_segments": 5}},
+            "sample_count 必须等于", "vmaf_segments")
+
     def test_out_of_range_target_margin_is_rejected(self):
         self.assert_rejected({"adaptive": {"target_margin": -0.1}},
                              "target_margin")
