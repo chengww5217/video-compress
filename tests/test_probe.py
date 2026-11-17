@@ -268,6 +268,47 @@ class VariableFrameRateTests(unittest.TestCase):
         self.assertAlmostEqual(highest, 30.0, places=2)
         self.assertEqual(dropped, 0.0)
 
+    def test_millisecond_timebase_rounding_does_not_raise_the_target(self):
+        """1/1000 时间基把 30fps 写成 33/34ms，不能因此选出 30.303。"""
+        durations = (["0.040"] * 95 + ["0.041"] * 54
+                     + ["0.033"] * 120 + ["0.034"] * 60)
+        target, highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 30.0, places=2)
+        self.assertAlmostEqual(highest, 30.0, places=2)
+        self.assertEqual(dropped, 0.0)
+
+    def test_zero_budget_does_not_snap_a_single_quantized_bucket(self):
+        """只有一个 33ms 桶时可能是真的 30.303fps；不能为了好看压到 30。"""
+        target, highest, dropped = _rate_plan_from_durations(
+            ["0.033"] * 100, 0.0)
+        self.assertAlmostEqual(target, 30.303, places=2)
+        self.assertAlmostEqual(highest, 30.303, places=2)
+        self.assertEqual(dropped, 0.0)
+
+    def test_zero_budget_keeps_a_quantized_pair_together(self):
+        """33/34ms 是同一帧率被毫秒时间基拆开的两半，零预算也不能拆散。"""
+        target, _highest, dropped = _rate_plan_from_durations(
+            ["0.033"] * 120 + ["0.034"] * 60, 0.0)
+        self.assertAlmostEqual(target, 30.0, places=2)
+        self.assertEqual(dropped, 0.0)
+
+    def test_quantized_low_rate_stays_at_24_75(self):
+        """24.75fps 被写成 40/41ms 时，簇均值仍应归一化回 99/4。"""
+        durations = (["0.040"] * 95 + ["0.041"] * 54
+                     + ["0.016"] * 3 + ["0.017"])
+        target, _highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 24.75, places=1)
+        self.assertEqual(_rate_string(target, prefer="99/4"), "99/4")
+        self.assertAlmostEqual(dropped, 4 / 153, places=3)
+
+    def test_all_quantized_high_rate_frames_count_toward_the_budget(self):
+        """60fps 被拆成 16/17ms 两个桶时，丢帧比例要把它们一起算。"""
+        durations = (["0.040404"] * 96
+                     + ["0.016"] * 2 + ["0.017"] * 2)
+        target, _highest, dropped = _rate_plan_from_durations(durations, 0.05)
+        self.assertAlmostEqual(target, 24.75, places=2)
+        self.assertAlmostEqual(dropped, 0.04, places=3)
+
     def test_small_high_rate_burst_is_dropped(self):
         """只有 2% 的 60fps，按 24.75 压、丢掉这 2%，不把整片抬到 60。"""
         durations = ["0.040404"] * 196 + ["0.016667"] * 4
@@ -323,6 +364,7 @@ class VariableFrameRateTests(unittest.TestCase):
         self.assertEqual(_rate_string(59.988), "60")
         self.assertEqual(_rate_string(24000 / 1001), "24000/1001")
         self.assertEqual(_rate_string(24.75, prefer="99/4"), "99/4")
+        self.assertEqual(_rate_string(24.7503), "99/4")
         self.assertEqual(_rate_string(0), "")
 
 
@@ -379,6 +421,18 @@ class ProbeTargetRateTests(unittest.TestCase):
         self.assertAlmostEqual(info.vfr_drop_ratio, 0.02, places=3)
         self.assertAlmostEqual(info.target_fps, 24.75, places=3)
         self.assertEqual(info.target_rate, "99/4")
+
+    def test_millisecond_timebase_target_rate_is_clean(self):
+        """mkv 的 33/34ms 量化不能把 30fps 目标抬成 30.303fps。"""
+        info = self.run_probe(
+            self.stream("99/4", "2477295/88943"),
+            "0.040\n" * 95 + "0.041\n" * 54
+            + "0.033\n" * 120 + "0.034\n" * 60)
+        self.assertTrue(info.vfr)
+        self.assertEqual(info.target_fps, 30.0)
+        self.assertEqual(info.target_rate, "30")
+        self.assertAlmostEqual(info.vfr_max_fps, 30.0, places=2)
+        self.assertEqual(info.vfr_drop_ratio, 0.0)
 
     def test_zero_drop_budget_uses_the_highest_rate(self):
         info = self.run_probe(

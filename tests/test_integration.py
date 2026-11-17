@@ -496,7 +496,9 @@ class IntegrationTests(unittest.TestCase):
 
         输入 -ss 会把时间戳归零到切点；如果参考段直接按切点重采样，24.75fps
         段和 30fps 产物的帧相位就对不上，一个正常产物会被量成 12 分。这里
-        造一个 6 秒 24.75fps + 6 秒 30fps 的片源，第一段正好落在低帧率区。
+        用 mkv 的 1/1000 时间基造一个 6 秒 24.75fps + 6 秒 30fps 的片源：
+        30fps 的帧时长会被量化成 33/34ms，目标帧率仍必须是 30 而不是
+        30.303；第一段正好落在低帧率区。
         """
         from vcompress import probe, verify
 
@@ -506,8 +508,8 @@ class IntegrationTests(unittest.TestCase):
         if "libvmaf" not in filters.stdout:
             self.skipTest("ffmpeg build has no libvmaf")
 
-        first = self.root / "vfr_a.mp4"
-        second = self.root / "vfr_b.mp4"
+        first = self.root / "vfr_a.mkv"
+        second = self.root / "vfr_b.mkv"
         src = self.root / "vfr.mp4"
         dist = self.root / "vfr_out.mp4"
         for out, rate in ((first, "99/4"), (second, "30")):
@@ -516,8 +518,7 @@ class IntegrationTests(unittest.TestCase):
                  "-f", "lavfi", "-i",
                  f"testsrc2=duration=6:size=320x180:rate={rate}",
                  "-c:v", "libx264", "-preset", "ultrafast", "-crf", "16",
-                 "-pix_fmt", "yuv420p", "-video_track_timescale", "90000",
-                 str(out)],
+                 "-pix_fmt", "yuv420p", str(out)],
                 check=True, capture_output=True, timeout=180,
             )
         listing = self.root / "vfr_list.txt"
@@ -526,7 +527,7 @@ class IntegrationTests(unittest.TestCase):
         subprocess.run(
             [tools.ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
              "-f", "concat", "-safe", "0", "-i", str(listing),
-             "-c", "copy", "-video_track_timescale", "90000", str(src)],
+             "-c", "copy", str(src)],
             check=True, capture_output=True, timeout=180,
         )
         subprocess.run(

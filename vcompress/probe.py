@@ -203,12 +203,22 @@ MIN_RATE_SHARE = 0.001
 # 时间戳坏掉时可能造出 1ms 一帧的「1000fps」。限制在编码器真正有意义的范围。
 MIN_RATE_FPS = 1.0
 MAX_RATE_FPS = 240.0
+# 同一个真实帧率会被容器的粗时间基量化到相邻两个时长桶：1/1000 时间基下
+# 30fps 会写成 33/34ms，两个桶单独看会算出 30.303/29.412。间隔不超过
+# 1.2ms 的相邻桶视为同一帧率，按加权平均时长参与分位；24/25fps 这种真正
+# 不同的帧率相差 1.67ms，不会被误合并。
+RATE_CLUSTER_GAP_US = 1200
+# 簇的加权平均时长和标准帧率的周期只差一个量化误差时，换成标准帧率；
+# 1.2% 足够覆盖 1/1000 时间基下 30/60fps 的 1ms 取整，又不会把 48/50
+# 这种相差 4% 的真实帧率并成一个。
+STANDARD_RATE_TOLERANCE = 0.012
 
 # 常见帧率的规范写法。用 packet 时长倒数算出来的是 30.0003 这种带误差的
 # 数，换成精确的 30 再交给 ffmpeg，容器里才是干净的帧率。
 STANDARD_RATES = (
     (24000 / 1001, "24000/1001"),
     (24.0, "24"),
+    (24.75, "99/4"),
     (25.0, "25"),
     (30000 / 1001, "30000/1001"),
     (30.0, "30"),
@@ -236,15 +246,20 @@ def _rate_string(fps: float, prefer: str = "") -> str:
     if fps <= 0:
         return ""
     preferred = _parse_fps(prefer)
+    # 标称帧率本身就是精确有理数时原样保留；这里只收几乎相同的值，避免把
+    # 已经选好的 29.97 又按标称 30 改回去。
     if preferred > 0 and abs(preferred - fps) <= max(0.01, fps * 1e-4):
         return prefer
     best = None
     for standard, text in STANDARD_RATES:
         diff = abs(standard - fps)
-        if diff > max(0.01, standard * 0.001):
+        # 0.2% 的容差要能盖住粗时间基的量化误差：1/1000 时间基下 24.75fps
+        # 的时长桶均值可能偏 0.1%。两个标准帧率之间至少差 0.1%（29.97/30），
+        # 取最接近的即可，不会把 30 写成 29.97。
+        if diff > max(0.01, standard * 2e-3):
             continue
         # 取最接近的，而不是先遇到的：59.988 同时落在 59.94 和 60 的
-        # 0.1% 容差里，只有按距离选才不会把 60fps 写成 59.94。
+        # 0.2% 容差里，只有按距离选才不会把 60fps 写成 59.94。
         if best is None or diff < best[0]:
             best = (diff, text)
     if best is not None:
@@ -263,6 +278,56 @@ def _detect_vfr(nominal: float, average: float) -> bool:
     return abs(nominal - average) > max(0.05, nominal * 0.005)
 
 
+def _rate_clusters(counts) -> list:
+    """把相邻的时长桶并成帧率簇，返回 [(代表时长µs, 帧数), ...]。
+
+    只合并间隔不超过 RATE_CLUSTER_GAP_US 的相邻桶。容差取所有小间隔里的
+    最大值：同一个帧率被 1/1000 时间基量化到 33/34ms 时，间隔是 1ms；
+    24fps 和 25fps 的 41.667/40ms 相差 1.667ms，仍分属两簇。
+
+    簇的加权平均时长落在某个标准帧率的 1.2% 以内时，换成该标准的精确
+    周期（33/34ms -> 30fps，16/17ms -> 60fps）。落不到标准上且簇里不止
+    一个桶时拆回逐桶：48/50fps 的 20/20.833ms 只差 0.833ms，但它们是
+    两个真实帧率（相差 4%），并成一个 49fps 反而会丢帧；拆开后分位策略
+    会选较高的 50fps，一帧不丢。
+    """
+    buckets = sorted(counts)
+    small_gaps = [b - a for a, b in zip(buckets, buckets[1:])
+                  if 0 < b - a <= RATE_CLUSTER_GAP_US]
+    tolerance = max(small_gaps) if small_gaps else 0
+    groups = []
+    current = []
+    for bucket in buckets:
+        if current and tolerance and bucket - current[-1] <= tolerance:
+            current.append(bucket)
+        else:
+            if current:
+                groups.append(current)
+            current = [bucket]
+    if current:
+        groups.append(current)
+
+    clusters = []
+    for group in groups:
+        count = sum(counts[b] for b in group)
+        mean_us = sum(b * counts[b] for b in group) / count
+        if len(group) == 1:
+            # 只有一个桶时没有“同一帧率被量化成两个桶”的证据，不往标准
+            # 帧率上硬掰：33ms 可能就是真实的 30.303fps，压到 30 会在
+            # vfr_max_drop_ratio=0 时也丢帧。小幅误差交给 _rate_string。
+            clusters.append((mean_us, count))
+            continue
+        rate = 1_000_000 / mean_us
+        standard = min(STANDARD_RATES, key=lambda item: abs(item[0] - rate))
+        if abs(standard[0] - rate) <= standard[0] * STANDARD_RATE_TOLERANCE:
+            clusters.append((1_000_000 / standard[0], count))
+        else:
+            # 均值落不到标准帧率上，说明这簇里可能混着两个真实帧率
+            # （48/50fps）。拆回逐桶，分位策略会选较高的那个，一帧不丢。
+            clusters.extend((b, counts[b]) for b in group)
+    return clusters
+
+
 def _rate_plan_from_durations(durations, max_drop_ratio: float = 0.05) -> tuple:
     """从 packet 时长里选编码目标帧率。
 
@@ -277,6 +342,10 @@ def _rate_plan_from_durations(durations, max_drop_ratio: float = 0.05) -> tuple:
     MIN_RATE_SHARE（0.1%）且不少于 MIN_RATE_SAMPLES 帧；时间戳坏掉的
     超范围时长直接忽略。低于门槛的高帧帧仍会算进丢弃比例，不会被偷偷
     当成「没发生」。
+
+    容器的粗时间基会把同一个帧率拆到相邻两个桶（mkv 的 30fps 是
+    33/34ms）。先按 `_rate_clusters` 并簇再分位，否则会选出一个
+    30.303 这种被量化误差抬高的非标准目标。
     """
     counts = Counter()
     total = 0
@@ -306,22 +375,23 @@ def _rate_plan_from_durations(durations, max_drop_ratio: float = 0.05) -> tuple:
     chosen = None
     highest = 0.0
     dropped = 0
+    groups = _rate_clusters(counts)
     # 从高帧率（短时长）往低帧率走。dropped 是当前候选之上、已经确定
     # 会被丢掉的帧数；只有没超预算的候选才配当目标。
-    for bucket in sorted(counts):
-        if counts[bucket] >= threshold:
+    for mean_us, count in groups:
+        if count >= threshold:
             if chosen is None:
-                highest = 1_000_000 / bucket
+                highest = 1_000_000 / mean_us
             if dropped <= budget:
-                chosen = bucket
+                chosen = mean_us
             else:
                 break
-        dropped += counts[bucket]
+        dropped += count
         if chosen is not None and dropped > budget:
             break
     if chosen is None:
         return 0.0, 0.0, 0.0
-    dropped = sum(n for bucket, n in counts.items() if bucket < chosen)
+    dropped = sum(n for mean_us, n in groups if mean_us < chosen)
     return 1_000_000 / chosen, highest, dropped / total
 
 
