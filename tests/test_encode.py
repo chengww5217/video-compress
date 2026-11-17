@@ -96,11 +96,11 @@ class VideoArgsTests(unittest.TestCase):
         ])
 
 class BuildCmdTests(unittest.TestCase):
-    def build(self, dst_name, s_args=None):
+    def build(self, dst_name, s_args=None, rate=""):
         cfg = make_cfg()
         return encode.build_cmd("ffmpeg.exe", Path("in.mp4"), Path(dst_name),
                                 cfg["encode"]["av1"], 27, ["-c:a", "copy"],
-                                s_args or [], "vcompress-v1")
+                                s_args or [], "vcompress-v1", rate=rate)
 
     def test_command_structure(self):
         cmd = self.build("out.tmp.mkv", ["-c:s:0", "srt"])
@@ -136,6 +136,14 @@ class BuildCmdTests(unittest.TestCase):
         self.assertIn("-movflags", cmd)
         self.assertNotIn("-dn", cmd)
         self.assertNotIn("0:t?", cmd)
+
+    def test_explicit_rate_makes_the_output_cfr(self):
+        """VFR 片源必须显式给 -r，否则 ffmpeg 按标称帧率把高帧率段抽掉。"""
+        cmd = self.build("out.tmp.mkv", rate="30")
+        self.assertEqual(cmd[cmd.index("-r") + 1], "30")
+
+    def test_unknown_rate_does_not_invent_a_frame_rate(self):
+        self.assertNotIn("-r", self.build("out.tmp.mkv"))
 
 class ParseProgressTests(unittest.TestCase):
     def test_out_time_us_is_seconds(self):

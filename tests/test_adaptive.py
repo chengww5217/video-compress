@@ -8,6 +8,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import helpers
 from helpers import make_cfg
@@ -144,7 +145,8 @@ class PickCrfMarginTests(unittest.TestCase):
         vmaf.extract_segment = self.orig_extract
         self.tmp.cleanup()
 
-    def fake_extract(self, ff, src, start, seconds, out, codec="libx264"):
+    def fake_extract(self, ff, src, start, seconds, out, codec="libx264",
+                     **kw):
         Path(out).write_bytes(b"ref")
 
     def fake_encode(self, ff, ref, crf, cfg, out):
@@ -200,7 +202,8 @@ class CancelDuringSearchTests(unittest.TestCase):
         proc.clear_cancel()
         self.tmp.cleanup()
 
-    def fake_extract(self, ff, src, start, seconds, out, codec="libx264"):
+    def fake_extract(self, ff, src, start, seconds, out, codec="libx264",
+                     **kw):
         Path(out).write_bytes(b"ref")
 
     def cancel_then_fail(self, ff, ref, crf, cfg, out):
@@ -260,6 +263,38 @@ class SampleCommandTests(unittest.TestCase):
                                     Path("out.mkv"))
         self.assertIn("No space left on device", str(cm.exception))
         self.assertNotIn("frame=", str(cm.exception))
+
+
+class PickCrfFrameRateTests(unittest.TestCase):
+    """搜索阶段的参考段也必须按目标帧率抽，否则它和产物抽检不是一把尺子。"""
+
+    def test_sample_starts_and_extraction_share_the_target_rate(self):
+        cfg = make_cfg()
+        ad = cfg["adaptive"]
+        ad["sample_count"] = 1
+        ad["sample_seconds"] = 10.0
+        log = logging.getLogger("pick-crf-fps-test")
+        log.addHandler(logging.NullHandler())
+
+        starts = mock.Mock(return_value=[100.0])
+        extract = mock.Mock()
+        score = mock.Mock(return_value=99.0)
+
+        def fake_encode_sample(ff, ref, crf, cfg, out):
+            Path(out).write_bytes(b"x" * 1000)
+
+        with mock.patch.object(vmaf, "sample_starts", starts), \
+                mock.patch.object(vmaf, "extract_segment", extract), \
+                mock.patch.object(adaptive, "_encode_sample",
+                                  side_effect=fake_encode_sample), \
+                mock.patch.object(vmaf, "measure", score):
+            adaptive.pick_crf(helpers.FakeTools(), Path("a.mp4"), 600.0,
+                              cfg["encode"]["av1"], ad, log,
+                              fps=30.0, rate="30")
+
+        starts.assert_called_once_with(600.0, 10.0, 1, fps=30.0)
+        _args, kwargs = extract.call_args
+        self.assertEqual(kwargs.get("rate"), "30")
 
 
 if __name__ == "__main__":

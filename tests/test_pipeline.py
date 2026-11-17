@@ -96,6 +96,21 @@ class HappyPathTests(PipelineTestCase):
         self.assertFalse(self.tmp_file().exists())
         self.assertEqual(ctx.stats.saved_bytes, 600)
 
+    def test_vfr_source_is_encoded_at_the_target_rate(self):
+        """混合帧率片源不显式 -r，30fps 段会被 ffmpeg 按 24.75 抽掉。"""
+        self.info = make_info(path=self.src, size=1000, duration=10.0,
+                              fps=24.75, avg_fps=27.85, vfr=True,
+                              target_fps=30.0, target_rate="30")
+        seen = {}
+
+        def run_encode(cmd, duration, cb=None):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(self.encoded)
+
+        _ctx, outcome = self.run_one(run_encode)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(seen["cmd"][seen["cmd"].index("-r") + 1], "30")
+
     def test_keep_mode_leaves_the_original_alone(self):
         ctx, outcome = self.run_one(self.fake_encode(), keep=True)
         self.assertEqual(outcome, pipeline.OK)

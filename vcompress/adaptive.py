@@ -93,7 +93,8 @@ def _sample_bitrate(total_bytes: int, span: float, segments: int) -> int:
 
 def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
              log, lossless_codec: str = "libx264",
-             model: str = "") -> "CrfChoice | None":
+             model: str = "", fps: float = 0.0,
+             rate: str = "") -> "CrfChoice | None":
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
     # 录取线 = 目标 + 余量：4 段 × 10s 的样本外推到一两小时的全片，波动
     # ±0.5 分是常态。贴线（95.02 vs 95.0）的 CRF 不收，自动降一档，不把宝
@@ -107,7 +108,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
     seconds = to_float(ad_cfg.get("sample_seconds"), 10.0)
     count = max(1, to_int(ad_cfg.get("sample_count"), 4))
 
-    starts = vmaf.sample_starts(duration, seconds, count)
+    starts = vmaf.sample_starts(duration, seconds, count, fps=fps)
     span = min(seconds, duration) if duration > 0 else seconds
     best = None
     log.info(f"[搜索] {em(src.name)}：抽 {len(starts)} 段 × {seconds:.0f}s "
@@ -119,7 +120,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
         for i, start in enumerate(starts):
             ref = root / f"ref{i}.mkv"
             vmaf.extract_segment(tools.ffmpeg, src, start, span, ref,
-                                 lossless_codec)
+                                 lossless_codec, rate=rate)
             refs.append(ref)
 
         goal = f"{target}+{margin:g}" if margin else f"{target}"

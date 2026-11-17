@@ -203,6 +203,17 @@ def check_basic(orig_info, out_info, cfg):
             return False, f"时长差了 {diff:.2f}s，超过允许的 {max_diff}s"
     if not out_info.video_codec:
         return False, "产物里没有视频流"
+    # 帧率必须和编码目标一致。VFR 片源按最高帧率做 CFR，产物若退回标称
+    # 帧率，高帧率段就少了一批帧；这一步只比元数据，必须在昂贵的解码/VMAF
+    # 之前拦下来。
+    target_fps = getattr(orig_info, "encode_fps", 0.0) or 0.0
+    if target_fps > 0 and out_info.fps > 0:
+        diff = abs(out_info.fps - target_fps)
+        if diff > max(0.05, target_fps * 0.001):
+            return False, (
+                f"帧率变了：{orig_info.fps:g} -> {out_info.fps:g}"
+                f"（编码目标 {target_fps:g} fps）"
+            )
     # 分辨率必须一致：滤镜链写错、编码器悄悄降采样都会在这里暴露。
     # 比的是显示尺寸而不是编码尺寸：ffmpeg 默认按 Display Matrix 自动旋转，
     # 无损旋转过的片源（1088x1920 + 旋转 90°）编出来就是 1920x1088，拿编码
@@ -355,7 +366,7 @@ def _score_segment(tools, ref: Path, dist: Path, threshold: float,
 
 
 def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
-                    cfg, log=None, fps: float = 0.0,
+                    cfg, log=None, fps: float = 0.0, rate: str = "",
                     lossless_codec: str = "libx264", model: str = ""):
     """返回 (均值, 最低段, 失败原因)；量不出来时前两个是 None。
 
@@ -385,9 +396,9 @@ def vmaf_spot_check(tools, orig: Path, compressed: Path, duration: float,
                 log.info(f"[校验] VMAF 抽检第 {i + 1}/{len(starts)} 段")
             try:
                 vmaf.extract_segment(tools.ffmpeg, orig, start, seconds, ref,
-                                     lossless_codec)
+                                     lossless_codec, rate=rate)
                 vmaf.extract_segment(tools.ffmpeg, compressed, start,
-                                     seconds, dist, lossless_codec)
+                                     seconds, dist, lossless_codec, rate=rate)
                 score = _score_segment(tools, ref, dist, threshold, i + 1,
                                        start, log, model)
                 if log:
@@ -462,7 +473,11 @@ def run_all(tools, src: Path, out: Path, orig_info, out_info, cfg,
             raise VerifyError("解码校验没过：" + "；".join(errs[:3]))
 
     mean, worst, msg = vmaf_spot_check(tools, src, out, orig_info.duration,
-                                       cfg, log=log, fps=orig_info.fps,
+                                       cfg, log=log,
+                                       fps=getattr(orig_info, "encode_fps",
+                                                   orig_info.fps),
+                                       rate=getattr(orig_info, "encode_rate",
+                                                   ""),
                                        lossless_codec=lossless_codec,
                                        model=vmaf_model(orig_info, cfg))
     if msg and mean is None:

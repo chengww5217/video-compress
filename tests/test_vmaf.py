@@ -87,6 +87,16 @@ class SegmentCmdTests(unittest.TestCase):
         """抽样失败的原因不能被进度行挤出错误信息（磁盘写满就这么丢过一次）。"""
         self.assertIn("-nostats", self.cmd(10.0))
 
+    def test_explicit_rate_keeps_vfr_samples_on_one_grid(self):
+        """参考段和产物段必须按同一个帧率抽，否则逐帧比较会错位。"""
+        cmd = vmaf.segment_cmd("ffmpeg", Path("in.mkv"), 10.0, 5.0,
+                               Path("out.mkv"), rate="30")
+        self.assertGreater(cmd.index("-r"), cmd.index("-i"))
+        self.assertEqual(cmd[cmd.index("-r") + 1], "30")
+
+    def test_unknown_rate_leaves_ffmpeg_default(self):
+        self.assertNotIn("-r", self.cmd(10.0))
+
 
 class SampleWindowNestingTests(unittest.TestCase):
     """搜索的样本窗口必须嵌在抽检的窗口里，两边才是同一把尺子。

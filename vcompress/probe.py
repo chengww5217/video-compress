@@ -1,13 +1,17 @@
 """ffprobe 探测与「这个文件要不要压」的判定。"""
 
 import json
+import logging
 import shutil
 import sys
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import proc
 from .util import to_float, to_int
+
+log = logging.getLogger("vcompress")
 
 CODEC_FAMILY = {
     "h264": "h264",
@@ -99,6 +103,12 @@ class VideoInfo:
     height: int = 0
     rotation: int = 0
     fps: float = 0.0
+    avg_fps: float = 0.0
+    # VFR 片源不能按容器标称帧率压：30fps 段会被悄悄抽成 24.75fps。
+    # target_fps/rate 是实际编码（以及 VMAF 抽样）用的统一口径。
+    vfr: bool = False
+    target_fps: float = 0.0
+    target_rate: str = ""
     bitrate: int = 0
     container_bitrate: int = 0
     duration: float = 0.0
@@ -146,16 +156,152 @@ class VideoInfo:
     def interlaced(self) -> bool:
         return self.field_order in INTERLACED_FIELD_ORDERS
 
+    @property
+    def encode_fps(self) -> float:
+        """编码、关键帧间隔和 VMAF 抽样共用的帧率。"""
+        return self.target_fps if self.target_fps > 0 else self.fps
+
+    @property
+    def encode_rate(self) -> str:
+        """ffmpeg `-r` 的参数；空串表示不知道帧率，交给 ffmpeg 的默认行为。"""
+        return self.target_rate or _rate_string(self.encode_fps)
+
 
 def _parse_fps(rate: str) -> float:
+    text = str(rate or "").strip()
+    if not text:
+        return 0.0
     try:
-        num, den = rate.split("/")
-        den = float(den)
-        if den == 0:
-            return 0.0
-        return float(num) / den
+        if "/" in text:
+            num, den = text.split("/")
+            den = float(den)
+            if den == 0:
+                return 0.0
+            return float(num) / den
+        # ffmpeg 的 -r 也可以直接写 30；归一化后的 target_rate 就是这种形式
+        return float(text)
     except (ValueError, AttributeError):
         return 0.0
+
+
+# ---------------------------------------------------------------- 可变帧率
+
+# 帧时长分桶到 10µs：0.033333 和 0.033334 这种量化差异会落进同一桶，
+# 23.976fps（41708µs）和 24fps（41667µs）仍分得开。
+RATE_BUCKET_US = 10
+# 一个帧率至少要有这么多帧才认。时间戳毛刺常常只影响一两帧；而真正的高
+# 帧率段哪怕只有 0.1 秒，在 120fps 下也有 12 帧。
+MIN_RATE_SAMPLES = 3
+# 时间戳坏掉时可能造出 1ms 一帧的「1000fps」。限制在编码器真正有意义的范围。
+MIN_RATE_FPS = 1.0
+MAX_RATE_FPS = 240.0
+
+# 常见帧率的规范写法。用 packet 时长倒数算出来的是 30.0003 这种带误差的
+# 数，换成精确的 30 再交给 ffmpeg，容器里才是干净的帧率。
+STANDARD_RATES = (
+    (24000 / 1001, "24000/1001"),
+    (24.0, "24"),
+    (25.0, "25"),
+    (30000 / 1001, "30000/1001"),
+    (30.0, "30"),
+    (48.0, "48"),
+    (50.0, "50"),
+    (60000 / 1001, "60000/1001"),
+    (60.0, "60"),
+    (100.0, "100"),
+    (120.0, "120"),
+    (240.0, "240"),
+)
+
+VFR_UNRESOLVED_REASON = (
+    "可变帧率（VFR），但探测不出最高帧率；按标称帧率压会丢帧，跳过"
+)
+
+
+def _rate_string(fps: float, prefer: str = "") -> str:
+    """把浮点帧率换成 ffmpeg `-r` 想要的精确写法。
+
+    容器给的 `r_frame_rate` 本身就是精确有理数（30000/1001），能用就原样
+    保留；从 packet 时长算出来的 30.0003 则按常见帧率归一化，避免产物带着
+    一个莫名其妙的帧率。
+    """
+    if fps <= 0:
+        return ""
+    preferred = _parse_fps(prefer)
+    if preferred > 0 and abs(preferred - fps) <= max(0.01, fps * 1e-4):
+        return prefer
+    for standard, text in STANDARD_RATES:
+        if abs(standard - fps) <= max(0.01, standard * 0.001):
+            return text
+    return f"{fps:.6f}".rstrip("0").rstrip(".")
+
+
+def _detect_vfr(nominal: float, average: float) -> bool:
+    """标称帧率和平均帧率对不上，基本就是混合帧率/VFR。
+
+    0.5% 的容差是留给 CFR 片源的量化误差（29.97 写成 30、mkv 的毫秒
+    时间基）；这个文件是 24.75 对 27.85，差 12.5%，远远超过。
+    """
+    if nominal <= 0 or average <= 0:
+        return False
+    return abs(nominal - average) > max(0.05, nominal * 0.005)
+
+
+def _max_rate_from_durations(durations) -> float:
+    """从 packet 时长里找全片出现过的最高帧率。
+
+    取最短时长能保证不丢帧，但单个损坏包可能造出 1ms 的假帧率。所以按时长
+    分桶计数，至少要出现 MIN_RATE_SAMPLES 次才认；再按从短到长找第一个
+    过门槛的桶，就是全片出现过的最高帧率。
+    """
+    counts = Counter()
+    total = 0
+    for raw in durations:
+        try:
+            duration = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if not 0 < duration < 10:
+            continue
+        bucket = int(round(duration * 1_000_000 / RATE_BUCKET_US)) * RATE_BUCKET_US
+        if bucket <= 0:
+            continue
+        counts[bucket] += 1
+        total += 1
+    if not counts:
+        return 0.0
+    threshold = max(MIN_RATE_SAMPLES, round(total * 0.00001))
+    for bucket in sorted(counts):
+        rate = 1_000_000 / bucket
+        if not MIN_RATE_FPS <= rate <= MAX_RATE_FPS:
+            continue
+        if counts[bucket] >= threshold:
+            return rate
+    return 0.0
+
+
+def _probe_max_rate(ffprobe: str, path: Path) -> float:
+    """扫全片 packet 时长，返回出现过的最高帧率；失败返回 0。
+
+    只对 VFR 片源做。通读一遍容器层（7.5GB 实测约一分钟），相对几小时的
+    编码可以忽略；抽样几个窗口则可能正好漏掉一段 60fps，压出来就丢帧了。
+    """
+    cmd = [
+        ffprobe, "-v", "error",
+        "-select_streams", "V:0",
+        "-show_entries", "packet=duration_time",
+        "-of", "csv=p=0",
+        str(path),
+    ]
+    try:
+        rc, out, err = proc.run_managed(cmd)
+    except proc.Cancelled:
+        raise
+    if rc != 0:
+        log.warning("扫描可变帧率失败（ffprobe 退出码 %s）：%s",
+                    rc, (err or "").strip()[:200])
+        return 0.0
+    return _max_rate_from_durations(out.splitlines())
 
 
 def _stream_bitrate(stream: dict) -> int:
@@ -240,8 +386,23 @@ def probe(tools: Tools, path: Path) -> VideoInfo:
     info.width = to_int(vstream.get("width"))
     info.height = to_int(vstream.get("height"))
     info.rotation = _rotation(vstream)
-    info.fps = _parse_fps(vstream.get("r_frame_rate")) or \
-        _parse_fps(vstream.get("avg_frame_rate"))
+    nominal_rate = vstream.get("r_frame_rate") or ""
+    average_rate = vstream.get("avg_frame_rate") or ""
+    info.fps = _parse_fps(nominal_rate) or _parse_fps(average_rate)
+    info.avg_fps = _parse_fps(average_rate) or info.fps
+    info.vfr = _detect_vfr(info.fps, info.avg_fps)
+    if info.vfr:
+        # 混合帧率必须按全片最高帧率做 CFR：按标称 24.75 压，30fps 段会被
+        # 每六帧丢一帧；只有 -r 30 才会把 24.75 段补成重复帧而不是丢 30fps 段。
+        target = _probe_max_rate(tools.ffprobe, path)
+        info.target_rate = _rate_string(target, prefer=nominal_rate)
+        # 以规范写法的有理数为准：packet 时长倒数算出来是 30.003，拿它做
+        # 帧对齐会在片尾漂出十几帧，切点又压回帧边界上。实际编码用的是
+        # -r 30（精确 30fps），抽样也必须用同一个数。
+        info.target_fps = _parse_fps(info.target_rate)
+    else:
+        info.target_rate = _rate_string(info.fps, prefer=nominal_rate)
+        info.target_fps = _parse_fps(info.target_rate) or info.fps
     info.pix_fmt = vstream.get("pix_fmt", "")
     info.field_order = str(vstream.get("field_order") or "").strip().lower()
     info.color_primaries = _color_tag(vstream.get("color_primaries"))
@@ -288,13 +449,22 @@ def should_skip(info: VideoInfo, cfg: dict):
             f"播放器不再反交错"
         )
 
+    # 探测不出 VFR 的最高帧率时不能硬压：ffmpeg 会按标称帧率做 CFR，
+    # 高帧率段直接被抽帧，而 VMAF 未必看得出来（它比的也是抽过帧的片段）。
+    if info.vfr and info.target_fps <= 0:
+        return True, VFR_UNRESOLVED_REASON
+
     min_size = int(cfg["skip"].get("min_size_mb", 0)) * 1024 * 1024
     if info.size and info.size < min_size:
         return True, f"文件太小（{info.size // 1024 // 1024} MB）"
 
     bpp_cfg = cfg["skip"]["bpp"]
     if info.codec_family and info.codec_family in bpp_cfg:
-        fps = info.fps if info.fps > 0 else 25.0
+        # 混合帧率片源按平均帧率算 BPP 才接近真实码率；用标称 24.75 会把
+        # 30fps 段的每像素码率算高，可能把一个已经压到位的文件放进编码队列。
+        fps = info.avg_fps if info.avg_fps > 0 else info.fps
+        if fps <= 0:
+            fps = 25.0
         pixels = info.width * info.height
         vbr = info.video_bitrate()
         if vbr > 0 and pixels > 0:

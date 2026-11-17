@@ -126,6 +126,14 @@ def process_file(ctx: RunContext, src: Path) -> str:
                           stage="probe", error=str(e)[:500])
         return ctx.stats.record(FAILED)
 
+    if info.vfr:
+        if info.target_fps > 0:
+            log.info(f"[探测] {em(src.name)}：可变帧率（标称 {info.fps:.3f} fps，"
+                     f"平均 {info.avg_fps:.3f} fps），按最高 "
+                     f"{em(f'{info.target_fps:.3f}')} fps 做 CFR 编码，不丢帧")
+        else:
+            log.warning(f"[探测] {em(src.name)}：可变帧率，但探测不出最高帧率")
+
     if ctx.remux:
         return _process_remux(ctx, src, info)
 
@@ -169,6 +177,10 @@ def _process_remux(ctx: RunContext, src: Path, info) -> str:
     min_size = int(ctx.cfg["skip"].get("min_size_mb", 0)) * 1024 * 1024
     if info.size and info.size < min_size:
         return _remux_skip(ctx, info, f"文件太小（{info.size // 1024 // 1024} MB）")
+    if info.vfr and info.target_fps <= 0:
+        # should_skip 的这类结论在重封装模式里会被当成「已高效」送去重编，
+        # 而重编同样会按标称帧率丢帧。必须单独拦在前面。
+        return _remux_skip(ctx, info, probe.VFR_UNRESOLVED_REASON)
 
     skip, _reason = probe.should_skip(info, ctx.cfg)
     if skip:
@@ -192,7 +204,7 @@ def _remux_reencode(ctx: RunContext, src: Path, info) -> str:
         return _remux_skip(ctx, info, "交错源重编码会丢交错标记，不敢动")
 
     gap_s = to_float(ctx.cfg["remux"].get("max_keyframe_gap_s"), 5.0)
-    keyint = remux.keyint_frames(info.fps, gap_s)
+    keyint = remux.keyint_frames(info.encode_fps, gap_s)
     if ctx.dry_run:
         log.info(f"[预览] 会重编 {em(src.name)}："
                  f"关键帧间隔收紧到最多 {gap_s:g}s（keyint={keyint}，"
@@ -249,7 +261,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         # 重封装模式下「该压的照常压」，但 keyint 一并收紧——不然这次压完
         # 下次还得为快进卡顿再重编一遍
         gap_s = to_float(ctx.cfg["remux"].get("max_keyframe_gap_s"), 5.0)
-        enc_cfg = remux.bound_keyint_cfg(enc_cfg, info.fps, gap_s)
+        enc_cfg = remux.bound_keyint_cfg(enc_cfg, info.encode_fps, gap_s)
 
     # 固定 CRF 也走一遍量化：配置里写 20.5 就该按 20.5 编，而不是被截成 20
     crf = encode.quantize_crf(to_float(enc_cfg["crf"], 28))
@@ -258,6 +270,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         picked = adaptive.pick_crf(
             ctx.tools, src, info.duration, enc_cfg, ctx.cfg["adaptive"], log,
             ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
+            fps=info.encode_fps, rate=info.encode_rate,
         )
         if picked is not None:
             crf = picked.crf
@@ -270,6 +283,7 @@ def _encode(ctx: RunContext, src: Path, info, tmp: Path,
         ctx.marker,
         info.comment,
         encode.color_args(info),
+        rate=info.encode_rate,
     )
     log.info(f"[编码] {em(src.name)}：crf={em(encode.fmt_crf(crf))}"
              f"（{ctx.encoder}）")
@@ -361,12 +375,12 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
         ctx.outputs.claim(src, target, ctx.out_ext, ctx.encoder, ctx.keep)
 
         gap_s = to_float(ctx.cfg["remux"].get("max_keyframe_gap_s"), 5.0)
-        keyint = remux.keyint_frames(info.fps, gap_s)  # 和下面绑定的是同一个数
+        keyint = remux.keyint_frames(info.encode_fps, gap_s)  # 和下面绑定的是同一个数
         growth_cap = to_float(ctx.cfg["remux"].get("max_growth_ratio"), 0.10)
         supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg,
                                           ctx.enc_cfg["codec"])
         enc_cfg = caps.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
-        enc_cfg = remux.bound_keyint_cfg(enc_cfg, info.fps, gap_s)
+        enc_cfg = remux.bound_keyint_cfg(enc_cfg, info.encode_fps, gap_s)
 
         if not (ctx.adaptive_enabled and info.duration > 0):
             raise SkipFile(
@@ -377,6 +391,7 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
             ctx.tools, src, info.duration, enc_cfg,
             remux.adaptive_cfg(ctx.cfg), log,
             ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
+            fps=info.encode_fps, rate=info.encode_rate,
         )
         if picked is None:
             raise SkipFile(
@@ -417,6 +432,7 @@ def _remux_gop(ctx: RunContext, src: Path, info) -> str:
             ctx.remux_marker,
             info.comment,
             encode.color_args(info),
+            rate=info.encode_rate,
         )
         t0 = time.monotonic()
         encode.run_encode(cmd, info.duration, printer)

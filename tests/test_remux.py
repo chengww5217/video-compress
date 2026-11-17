@@ -260,6 +260,39 @@ class RemuxEntryTests(RemuxPipelineTestCase):
         self.assertEqual(rec["mode"], "remux")
         self.assertIn("重封装标记", rec["reason"])
 
+    def test_vfr_reencode_uses_target_rate_and_keyint(self):
+        """重封装同样按最高帧率 CFR；keyint 也按这个帧率算。"""
+        self.info.fps = 24.75
+        self.info.avg_fps = 27.85
+        self.info.vfr = True
+        self.info.target_fps = 30.0
+        self.info.target_rate = "30"
+        seen = {}
+
+        def run_encode(cmd, duration, cb=None):
+            seen["cmd"] = cmd
+            Path(cmd[-1]).write_bytes(self.encoded)
+
+        _ctx, outcome = self.run_remux(
+            [], [], choice=adaptive.CrfChoice(30, 1, True, 98.2),
+            run_encode=run_encode)
+        self.assertEqual(outcome, pipeline.OK)
+        joined = " ".join(seen["cmd"])
+        self.assertIn("-r 30", joined)
+        self.assertIn("keyint=150", joined)
+
+    def test_unresolved_vfr_is_skipped_instead_of_reencoded(self):
+        self.info.vfr = True
+        self.info.target_fps = 0.0
+        self.info.target_rate = ""
+        ctx = self.ctx()
+        with mock.patch.object(pipeline.probe, "probe",
+                              return_value=self.info):
+            outcome = pipeline.process_file(ctx, self.src)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertIn("VFR", self.store.last(self.src)["reason"])
+        self.assertFalse(self.tmp_file().exists())
+
     def test_interlaced_source_is_not_touched(self):
         self.info.field_order = "tt"
         ctx = self.ctx()

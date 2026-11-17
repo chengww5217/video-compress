@@ -162,6 +162,23 @@ class CheckBasicTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("产物带了 180° 旋转标记", msg)
 
+    def test_vfr_output_must_keep_the_target_frame_rate(self):
+        """混合帧率按 30fps CFR 编码，产物退回 24.75 就是高帧率段丢了帧。"""
+        orig = make_info(duration=600.0, fps=24.75, avg_fps=27.85,
+                         vfr=True, target_fps=30.0, target_rate="30")
+        out = make_info(video_codec="av1", duration=600.0, fps=24.75)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("帧率变了", msg)
+        self.assertIn("30", msg)
+
+    def test_vfr_output_at_the_target_rate_passes(self):
+        orig = make_info(duration=600.0, fps=24.75, avg_fps=27.85,
+                         vfr=True, target_fps=30.0, target_rate="30")
+        out = make_info(video_codec="av1", duration=600.0, fps=30.0)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertTrue(ok, msg)
+
 
 class CheckSizeTests(unittest.TestCase):
     """体积与实际收益。和 check_basic 分开是因为失败的后果不同：这个结论重跑
@@ -566,12 +583,14 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.cfg["verify"]["vmaf_segments"] = 2
         self.cfg["verify"]["vmaf_sample_seconds"] = 5
         self.extracted = []
+        self.rates = []
         self.scores = [96.0, 94.0]
         self.shifts = []
         self.orig_extract = vmaf.extract_segment
         self.orig_score = vmaf.measure
-        vmaf.extract_segment = lambda ff, src, start, secs, out, codec="libx264": \
-            self.extracted.append((Path(src).name, round(start, 3)))
+        vmaf.extract_segment = lambda ff, src, start, secs, out, codec="libx264", **kw: (
+            self.extracted.append((Path(src).name, round(start, 3))),
+            self.rates.append(kw.get("rate", "")))
         vmaf.measure = self.fake_score
 
     def fake_score(self, ff, dist, ref, shift=0, **kw):
@@ -582,13 +601,13 @@ class VmafSpotCheckTests(unittest.TestCase):
         vmaf.extract_segment = self.orig_extract
         vmaf.measure = self.orig_score
 
-    def check(self, duration=600.0, fps=0.0):
+    def check(self, duration=600.0, fps=0.0, rate=""):
         return verify.vmaf_spot_check(FakeTools(), Path("a.mkv"),
                                       Path("b.mkv"), duration, self.cfg,
-                                      fps=fps)
+                                      fps=fps, rate=rate)
 
-    def check_mean_msg(self, duration=600.0, fps=0.0):
-        mean, _worst, msg = self.check(duration, fps)
+    def check_mean_msg(self, duration=600.0, fps=0.0, rate=""):
+        mean, _worst, msg = self.check(duration, fps, rate)
         return mean, msg
 
     def test_disabled_is_not_reported_as_unavailable(self):
@@ -602,6 +621,11 @@ class VmafSpotCheckTests(unittest.TestCase):
         self.assertAlmostEqual(worst, 94.0)
         self.assertEqual(msg, "")
         self.assertEqual(len(self.extracted), 4, "2 segments x ref+dist")
+
+    def test_target_rate_is_used_for_every_extraction(self):
+        """参考段和产物段都按目标帧率抽，VFR 才不会两套丢帧网格错位。"""
+        self.check(fps=30.0, rate="30")
+        self.assertEqual(self.rates, ["30", "30", "30", "30"])
 
     def test_mean_below_threshold_reports_every_segment(self):
         self.cfg["verify"]["vmaf_min_segment"] = 0.0

@@ -33,6 +33,10 @@ def make_info(**kw):
         width=1920,
         height=1080,
         fps=30.0,
+        avg_fps=0.0,
+        vfr=False,
+        target_fps=0.0,
+        target_rate="",
         bitrate=6_000_000,
         container_bitrate=0,
         duration=600.0,
@@ -51,6 +55,14 @@ def make_info(**kw):
         subtitle_codecs=[],
     )
     base.update(kw)
+    # 绝大多数测试不关心 VFR：target 默认跟着 fps 走，只有显式传入的
+    # 混合帧率用例才需要不同的 target。
+    if "avg_fps" not in kw:
+        base["avg_fps"] = base["fps"]
+    if "target_fps" not in kw:
+        base["target_fps"] = base["fps"]
+    if "target_rate" not in kw:
+        base["target_rate"] = f"{base['fps']:g}" if base["fps"] else ""
     return VideoInfo(**base)
 
 

@@ -74,7 +74,8 @@ def lossless_args(codec: str = "libx264") -> list:
 
 
 def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
-                out: Path, codec: str = "libx264") -> list:
+                out: Path, codec: str = "libx264",
+                rate: str = "") -> list:
     """抽一段无损片段的命令：先粗 seek 到目标前几秒，再精确 seek 微调。
 
     只用精确 seek（-ss 放在 -i 之后）要从文件开头解码，两小时的片子抽三段
@@ -83,6 +84,9 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
 
     用 0:V:0 而不是 0:v:0：v 会把封面图（attached_pic）算成视频流，真编码
     时用的是 0:V（排除封面），两边取的流必须是同一条才有比较意义。
+
+    rate 是 VFR 片源的统一帧率口径。不给的话 ffmpeg 按标称帧率抽，混合
+    帧率片源的参考段和产物段会各自丢掉不同的一组帧，VMAF 直接变成乱比。
     """
     lead = min(SEEK_LEADIN_S, max(0.0, start))
     return [
@@ -91,6 +95,7 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
         "-ss", f"{max(0.0, start - lead):.3f}",
         "-i", str(src),
         "-ss", f"{lead:.3f}", "-t", f"{seconds:.3f}",
+        *(["-r", rate] if rate else []),
         "-map", "0:V:0", "-an", "-sn", "-dn",
         *lossless_args(codec),
         str(out),
@@ -98,9 +103,10 @@ def segment_cmd(ffmpeg: str, src: Path, start: float, seconds: float,
 
 
 def extract_segment(ffmpeg: str, src: Path, start: float, seconds: float,
-                    out: Path, codec: str = "libx264"):
+                    out: Path, codec: str = "libx264",
+                    rate: str = ""):
     rc, _out, err = proc.run_managed(
-        segment_cmd(ffmpeg, src, start, seconds, out, codec))
+        segment_cmd(ffmpeg, src, start, seconds, out, codec, rate))
     if rc != 0:
         raise VmafError(f"抽取样本片段失败：{proc.error_tail(err)}")
 

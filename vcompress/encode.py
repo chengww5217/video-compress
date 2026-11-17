@@ -153,7 +153,8 @@ def container_maps_and_tail(container: str) -> tuple:
 
 def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
               crf: float, a_args: list, s_args: list, marker: str,
-              original_comment: str = "", c_args: list = None) -> list:
+              original_comment: str = "", c_args: list = None,
+              rate: str = "") -> list:
     container = dst.suffix.lower()
     maps, tail = container_maps_and_tail(container)
     return [
@@ -163,6 +164,10 @@ def build_cmd(ffmpeg: str, src: Path, dst: Path, encoder_cfg: dict,
         "-map_metadata", "0",
         "-map_chapters", "0",
         *video_args(encoder_cfg, crf),
+        # 显式 CFR。VFR/混合帧率片源不指定的话，ffmpeg 按容器标称帧率输出，
+        # 高帧率段会被悄悄抽帧（实测 30fps 段压完只剩 24.75fps）。CFR 到
+        # 全片最高帧率会把低帧率段补成重复帧，一帧不丢。
+        *(["-r", rate] if rate else []),
         *(c_args or []),
         *a_args,
         *s_args,

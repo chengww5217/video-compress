@@ -2,12 +2,17 @@ import sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import json
 import unittest
+from unittest import mock
 
 import helpers
 from helpers import make_cfg, make_info
-from vcompress.probe import (_color_tag, _hdr_markers, _parse_fps, _rotation,
-                             _stream_bitrate, should_skip)
+from vcompress import probe
+from vcompress.probe import (_color_tag, _detect_vfr, _hdr_markers,
+                             _max_rate_from_durations, _parse_fps,
+                             _rate_string, _rotation, _stream_bitrate,
+                             should_skip)
 from vcompress.util import to_int as _to_int
 
 
@@ -70,6 +75,10 @@ class RotationTests(unittest.TestCase):
 class ParseHelperTests(unittest.TestCase):
     def test_parse_fps_fraction(self):
         self.assertAlmostEqual(_parse_fps("30000/1001"), 29.97, places=2)
+
+    def test_parse_fps_plain_number(self):
+        self.assertEqual(_parse_fps("30"), 30.0)
+        self.assertEqual(_parse_fps("24.75"), 24.75)
 
     def test_parse_fps_zero_denominator(self):
         self.assertEqual(_parse_fps("30/0"), 0.0)
@@ -235,6 +244,112 @@ class InterlacedTests(unittest.TestCase):
         self.assertFalse(make_info(field_order="progressive").interlaced)
         # 大小写在探测时就规范化了，这里只认小写
         self.assertFalse(make_info(field_order="BT").interlaced)
+
+
+class VariableFrameRateTests(unittest.TestCase):
+    """混合帧率片源：按最高帧率做 CFR，否则高帧率段会被悄悄抽帧。"""
+
+    def test_detects_mixed_frame_rate(self):
+        self.assertTrue(_detect_vfr(99 / 4, 2477295 / 88943))
+        self.assertTrue(_detect_vfr(24.0, 30.0))
+
+    def test_cfr_rounding_noise_is_not_vfr(self):
+        # 29.97 被写成 30、mkv 的毫秒时间基，都不是混合帧率
+        self.assertFalse(_detect_vfr(30.0, 29.97))
+        self.assertFalse(_detect_vfr(24000 / 1001, 24000 / 1001))
+        self.assertFalse(_detect_vfr(0.0, 30.0))
+        self.assertFalse(_detect_vfr(30.0, 0.0))
+
+    def test_mixed_durations_pick_the_highest_rate(self):
+        durations = ["0.040404"] * 100 + ["0.033333"] * 50
+        self.assertAlmostEqual(_max_rate_from_durations(durations), 30.0,
+                               places=2)
+
+    def test_one_off_timestamp_glitch_is_ignored(self):
+        durations = ["0.040404"] * 100 + ["0.001"]  # 假 1000fps
+        self.assertAlmostEqual(_max_rate_from_durations(durations), 24.75,
+                               places=2)
+
+    def test_uniform_cfr_keeps_its_rate(self):
+        self.assertAlmostEqual(
+            _max_rate_from_durations(["0.041708"] * 100), 24000 / 1001,
+            places=2)
+
+    def test_no_usable_durations_is_zero(self):
+        self.assertEqual(_max_rate_from_durations([]), 0.0)
+        self.assertEqual(_max_rate_from_durations(["N/A", "0", "-1"]), 0.0)
+
+    def test_rates_are_normalised_for_ffmpeg(self):
+        self.assertEqual(_rate_string(30.0003), "30")
+        self.assertEqual(_rate_string(24000 / 1001), "24000/1001")
+        self.assertEqual(_rate_string(24.75, prefer="99/4"), "99/4")
+        self.assertEqual(_rate_string(0), "")
+
+
+class ProbeTargetRateTests(unittest.TestCase):
+    """probe() 要把「按哪个帧率压」一并定下来，后续所有环节才同一口径。"""
+
+    def setUp(self):
+        self.cfg = make_cfg()
+        self.path = Path("mixed.mp4")
+
+    def stream(self, nominal, average):
+        return {
+            "format": {"duration": "10.0", "size": "1000000",
+                       "bit_rate": "4000000", "tags": {}},
+            "streams": [{
+                "codec_type": "video", "codec_name": "h264",
+                "width": 1920, "height": 1080,
+                "r_frame_rate": nominal, "avg_frame_rate": average,
+                "duration": "10.0", "pix_fmt": "yuv420p",
+                "field_order": "progressive",
+            }],
+            "frames": [],
+        }
+
+    def run_probe(self, data, durations=None, rc=0):
+        replies = [(0, json.dumps(data), "")]
+        if durations is not None:
+            replies.append((rc, durations, ""))
+        with mock.patch.object(probe.proc, "run_managed",
+                               side_effect=replies):
+            return probe.probe(helpers.FakeTools(), self.path)
+
+    def test_mixed_frame_rate_uses_the_highest_rate(self):
+        info = self.run_probe(
+            self.stream("99/4", "2477295/88943"),
+            "0.040404\n" * 100 + "0.033333\n" * 50)
+        self.assertTrue(info.vfr)
+        self.assertAlmostEqual(info.fps, 24.75, places=3)
+        self.assertAlmostEqual(info.avg_fps, 2477295 / 88943, places=3)
+        self.assertEqual(info.target_fps, 30.0)
+        self.assertEqual(info.target_rate, "30")
+        self.assertEqual(info.encode_fps, 30.0)
+        self.assertEqual(info.encode_rate, "30")
+
+    def test_cfr_source_keeps_the_exact_rational_rate(self):
+        info = self.run_probe(self.stream("24000/1001", "24000/1001"))
+        self.assertFalse(info.vfr)
+        self.assertEqual(info.target_rate, "24000/1001")
+        self.assertAlmostEqual(info.encode_fps, 24000 / 1001, places=3)
+
+    def test_unresolved_vfr_is_skipped_not_silently_dropped(self):
+        info = self.run_probe(self.stream("99/4", "2477295/88943"),
+                              "", rc=1)
+        self.assertTrue(info.vfr)
+        self.assertEqual(info.target_fps, 0.0)
+        skip, reason = should_skip(info, self.cfg)
+        self.assertTrue(skip)
+        self.assertIn("VFR", reason)
+
+    def test_vfr_uses_average_fps_for_the_bpp_gate(self):
+        """30fps 段占多数时，拿标称 24.75 算 BPP 会把码率算高。"""
+        bitrate = int(0.05 * 1920 * 1080 * 26.0)  # 按 24.75 算高、按 27.85 算低
+        info = make_info(fps=24.75, avg_fps=27.85, vfr=True,
+                         target_fps=30.0, target_rate="30", bitrate=bitrate)
+        skip, reason = should_skip(info, self.cfg)
+        self.assertTrue(skip, reason)
+        self.assertIn("低于阈值", reason)
 
 
 if __name__ == "__main__":
