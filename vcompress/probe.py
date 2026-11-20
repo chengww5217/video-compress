@@ -233,6 +233,16 @@ STANDARD_RATES = (
     (240.0, "240"),
 )
 
+# BPP 预筛结论的标记。pipeline 要区分「BPP 低」和别的跳过原因，
+# 前者可以先用低成本预检再决定，后者（标记/交错/太小/VFR）不能。
+BPP_REASON_MARKER = "每像素码率"
+
+
+def is_bpp_reason(reason: str) -> bool:
+    """这条跳过原因是不是 BPP 预筛给出的。"""
+    return BPP_REASON_MARKER in (reason or "")
+
+
 VFR_UNRESOLVED_REASON = (
     "可变帧率（VFR），但探测不出可用的目标帧率；按标称帧率压会丢帧，跳过"
 )
@@ -579,7 +589,12 @@ def _file_size(path: Path) -> int:
         return 0
 
 
-def should_skip(info: VideoInfo, cfg: dict):
+def should_skip(info: VideoInfo, cfg: dict, check_bpp: bool = True):
+    """按元数据、交错、VFR、大小、BPP、收益粗估判断要不要处理。
+
+    ``check_bpp=False`` 给 BPP 预检模式用：先绕过 BPP，确认其余条件是否
+    已经足以跳过（比如 AV1 源的 expected_ratio 本来就判没收益）。
+    """
     marker = str(cfg["skip"].get("tag_marker", "vcompress"))
     if marker and marker.lower() in (info.comment or "").lower():
         return True, f"元数据里已有 {marker} 标记，之前压过了"
@@ -604,7 +619,7 @@ def should_skip(info: VideoInfo, cfg: dict):
         return True, f"文件太小（{info.size // 1024 // 1024} MB）"
 
     bpp_cfg = cfg["skip"]["bpp"]
-    if info.codec_family and info.codec_family in bpp_cfg:
+    if check_bpp and info.codec_family and info.codec_family in bpp_cfg:
         # 混合帧率片源按平均帧率算 BPP 才接近真实码率；用标称 24.75 会把
         # 30fps 段的每像素码率算高，可能把一个已经压到位的文件放进编码队列。
         fps = info.avg_fps if info.avg_fps > 0 else info.fps
@@ -617,7 +632,7 @@ def should_skip(info: VideoInfo, cfg: dict):
             thr = float(bpp_cfg[info.codec_family])
             if bpp < thr:
                 return True, (
-                    f"{info.codec_family} 每像素码率 {bpp:.4f} bits，"
+                    f"{info.codec_family} {BPP_REASON_MARKER} {bpp:.4f} bits，"
                     f"已经低于阈值 {thr}，视为压到位了"
                 )
 

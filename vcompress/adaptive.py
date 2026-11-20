@@ -28,7 +28,7 @@ class CrfChoice:
 
 
 def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
-               target: float, model: str, log) -> tuple:
+               target: float, model: str, log, label: str = "搜索") -> tuple:
     """在所有样本段上试这个 CRF，返回 (最差段分数, 样本总字节, 量过的段数)。
 
     取最差而不是平均：平均分能被好段抬起来，而观感是由最差处决定的。某段已经
@@ -48,7 +48,7 @@ def _probe_crf(tools, refs: list, crf, enc_cfg: dict, root: Path,
             sample.unlink(missing_ok=True)
         total_bytes += size
         measured += 1
-        log.debug(f"[搜索] crf={encode.fmt_crf(crf)} 第 {i + 1}/{len(refs)} 段："
+        log.debug(f"[{label}] crf={encode.fmt_crf(crf)} 第 {i + 1}/{len(refs)} 段："
                   f"VMAF {score:.2f}，{fmt_size(size)}")
         worst = score if worst is None else min(worst, score)
         if worst < target:
@@ -77,7 +77,7 @@ def _sample_bitrate(total_bytes: int, span: float, segments: int) -> int:
 def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
              log, lossless_codec: str = "libx264",
              model: str = "", fps: float = 0.0,
-             rate: str = "") -> "CrfChoice | None":
+             rate: str = "", label: str = "搜索") -> "CrfChoice | None":
     target = to_float(ad_cfg.get("target_vmaf"), 95.0)
     # 录取线 = 目标 + 余量：4 段 × 10s 的样本外推到一两小时的全片，波动
     # ±0.5 分是常态。贴线（95.02 vs 95.0）的 CRF 不收，自动降一档，不把宝
@@ -94,7 +94,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
     starts = vmaf.sample_starts(duration, seconds, count, fps=fps)
     span = min(seconds, duration) if duration > 0 else seconds
     best = None
-    log.info(f"[搜索] {em(src.name)}：抽 {len(starts)} 段 × {seconds:.0f}s "
+    log.info(f"[{label}] {em(src.name)}：抽 {len(starts)} 段 × {seconds:.0f}s "
              f"作为参考样本")
     tmpdir = scratch.temp_dir(prefix="vcadapt_")
     try:
@@ -110,8 +110,8 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
         while hi - lo > step:
             mid = search_midpoint(lo, hi, step)
             score, sample_bytes, measured = _probe_crf(
-                tools, refs, mid, enc_cfg, root, accept, model, log)
-            log.info(f"[搜索] {em(src.name)} crf={em(encode.fmt_crf(mid))}："
+                tools, refs, mid, enc_cfg, root, accept, model, log, label)
+            log.info(f"[{label}] {em(src.name)} crf={em(encode.fmt_crf(mid))}："
                      f"最差段 VMAF {em(f'{score:.2f}')}（目标 {goal}）")
             if score >= accept:
                 best = CrfChoice(mid, _sample_bitrate(sample_bytes, span,
@@ -121,7 +121,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
                 hi = mid
         if best is None:
             score, sample_bytes, measured = _probe_crf(
-                tools, refs, lo, enc_cfg, root, target, model, log)
+                tools, refs, lo, enc_cfg, root, target, model, log, label)
             if score < target:
                 log.warning(
                     f"{em(src.name)}：连 crf={encode.fmt_crf(lo)} 都只有 VMAF "
@@ -129,7 +129,7 @@ def pick_crf(tools, src: Path, duration: float, enc_cfg: dict, ad_cfg: dict,
                 )
             best = CrfChoice(lo, _sample_bitrate(sample_bytes, span, measured),
                              score >= target, score)
-        log.info(f"[搜索] {em(src.name)} 定为 crf={em(encode.fmt_crf(best.crf))}"
+        log.info(f"[{label}] {em(src.name)} 定为 crf={em(encode.fmt_crf(best.crf))}"
                  f"（目标 VMAF {target}，{len(refs)} 段里最差 "
                  f"{best.worst_vmaf:.2f}，样本码率 "
                  f"{best.video_bitrate // 1000} kbps）")

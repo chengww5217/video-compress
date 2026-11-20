@@ -206,6 +206,12 @@ class ShouldSkipTests(unittest.TestCase):
         skip, reason = should_skip(make_info(), self.cfg)
         self.assertFalse(skip, reason)
 
+    def test_bpp_gate_can_be_skipped_for_pilot(self):
+        """pilot 模式下要能只看其余条件，不被 BPP 提前拦住。"""
+        skip, reason = should_skip(make_info(bitrate=3_000_000), self.cfg,
+                                   check_bpp=False)
+        self.assertFalse(skip, reason)
+
     def test_low_bitrate_hevc_skips(self):
         info = make_info(video_codec="hevc", codec_family="hevc", bitrate=1_000_000)
         skip, reason = should_skip(info, self.cfg)

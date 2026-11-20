@@ -33,6 +33,20 @@ DEFAULTS = {
             "h264": 0.05, "hevc": 0.03, "vp9": 0.03, "av1": 0.02,
             "mpeg2video": 0.12, "mpeg4": 0.08,
         },
+        # BPP 低于阈值时怎么处理：hard=直接跳过（旧行为）；pilot=先用
+        # 少量短样本粗搜一次，确认没收益再跳过；off=不按 BPP 跳过，始终
+        # 走完整搜索。低 BPP 只说明源码率低，不等于 AV1 压不出收益。
+        "bpp_check": "pilot",
+        # pilot 模式的低成本预检。样本少而短、CRF 步长粗，只用来筛掉
+        # 明显没戏的文件；预检说有收益就继续走完整搜索，不用它定 CRF。
+        "bpp_pilot": {
+            "sample_count": 1,
+            "sample_seconds": 4.0,
+            "search_step": 4.0,
+            # 预检预估收益低于这个值才跳过。故意比 min_saving_ratio 低，
+            # 给「一段短样本外推全片」的误差留余量，宁可多搜一次。
+            "promote_saving": 0.10,
+        },
         "expected_ratio": {
             "h264": 0.55, "hevc": 0.78, "vp9": 0.80, "av1": 0.92,
             "mpeg2video": 0.40, "mpeg4": 0.45, "flv1": 0.45, "wmv3": 0.50,
@@ -157,6 +171,7 @@ FREEFORM_TABLES = {("skip", "bpp"), ("skip", "expected_ratio")}
 # 取值必须落在 [0, 1] 的比例项
 RATIO_KEYS = {
     ("skip", "min_saving_ratio"),
+    ("skip", "bpp_pilot", "promote_saving"),
     ("encode", "vfr_max_drop_ratio"),
     ("verify", "min_actual_saving"),
     ("remux", "max_growth_ratio"),
@@ -292,6 +307,18 @@ def _check_semantics(cfg: dict, errors: list):
         errors.append("[adaptive] search_step 至少是 0.25"
                       "（CRF 的实际可用粒度）")
 
+    bpp_check = str(cfg["skip"]["bpp_check"])
+    if bpp_check not in ("hard", "pilot", "off"):
+        errors.append('[skip] bpp_check 只能是 "hard"、"pilot" 或 "off"')
+    bp = cfg["skip"]["bpp_pilot"]
+    if int(bp["sample_count"]) < 1:
+        errors.append("[skip.bpp_pilot] sample_count 至少是 1")
+    if float(bp["sample_seconds"]) <= 0:
+        errors.append("[skip.bpp_pilot] sample_seconds 必须是正数")
+    if float(bp["search_step"]) < 0.25:
+        errors.append("[skip.bpp_pilot] search_step 至少是 0.25"
+                      "（CRF 的实际可用粒度）")
+
     vf = cfg["verify"]
     if not 0 < float(vf["vmaf_threshold"]) <= 100:
         errors.append("[verify] vmaf_threshold 必须在 (0, 100] 之间")
@@ -376,6 +403,7 @@ def normalise(user_cfg: dict) -> dict:
     cfg = _merge(DEFAULTS, user_cfg or {})
     cfg["encode"]["output_container"] = cfg["encode"]["output_container"].lower()
     cfg["skip"]["extensions"] = [e.lower() for e in cfg["skip"]["extensions"]]
+    cfg["skip"]["bpp_check"] = str(cfg["skip"]["bpp_check"]).lower()
     # 用户新增的编码器子表也要拿到可选键的默认值
     for name in encoder_names(cfg):
         cfg["encode"][name].setdefault("extra", "")

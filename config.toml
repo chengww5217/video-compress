@@ -16,8 +16,12 @@ min_saving_ratio = 0.15   # 预估收益低于这个比例就不压
 extensions = [".mp4", ".mkv", ".mov", ".avi", ".webm", ".m4v", ".flv", ".wmv", ".mpg", ".mpeg"]
 tag_marker = "vcompress"  # 写进 comment 的标记，用来认出"已经压过了"
 skip_interlaced = true    # 交错源（DVD/电视台 rip）跳过：压过去会丢交错标记，播放器不再反交错
+# BPP 低于阈值时：hard=直接跳过（旧行为）/ pilot=先用少量短样本粗搜确认 /
+# off=不按 BPP 跳过，始终走完整搜索。低 BPP 只说明源码率低，不等于压不出收益。
+bpp_check = "pilot"
 
-# 每像素码率下限（BPP = 视频轨码率 ÷ 宽 ÷ 高 ÷ 帧率）。低于阈值视为已压到位。
+# 每像素码率下限（BPP = 视频轨码率 ÷ 宽 ÷ 高 ÷ 帧率）。低于阈值只是粗筛，
+# 默认交给 bpp_check 的 pilot 预检确认是否真的没收益。
 [skip.bpp]
 h264 = 0.05
 hevc = 0.03
@@ -25,6 +29,15 @@ vp9 = 0.03
 av1 = 0.02
 mpeg2video = 0.12
 mpeg4 = 0.08
+
+# pilot 模式的低成本预检：样本少而短、CRF 步长粗，只负责筛掉明显没戏的文件。
+# 预检说「有收益」就继续完整搜索，不用它定最终 CRF。
+[skip.bpp_pilot]
+sample_count = 1
+sample_seconds = 4.0
+search_step = 4.0
+# 预检预估收益低于这个值才跳过；故意低于 min_saving_ratio，给样本外推误差留余量。
+promote_saving = 0.10
 
 # 编码前的粗略压缩比预估（源编码 -> 预计能压到原来的百分之多少）。
 # 自适应搜索完成后会用样本实测码率再算一次更准的，这张表只用来提前筛掉没戏的。

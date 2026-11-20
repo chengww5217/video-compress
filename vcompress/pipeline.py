@@ -146,6 +146,34 @@ def process_file(ctx: RunContext, src: Path) -> str:
         return _process_remux(ctx, src, info)
 
     skip, reason = probe.should_skip(info, ctx.cfg)
+    if skip and probe.is_bpp_reason(reason):
+        # 低 BPP 只是「大概率没戏」，不是「确定没戏」。默认先跑一次低成本
+        # 预检：预检说还有收益就继续完整搜索，确认没收益才跳过。想恢复旧
+        # 的硬跳过把 [skip] bpp_check 改成 "hard"；想完全不按 BPP 筛就
+        # 改成 "off"。
+        mode = str(ctx.cfg["skip"].get("bpp_check", "pilot")).lower()
+        bpp_reason = reason
+        if mode != "hard":
+            # BPP 只是第一道筛子，后面的收益粗估仍要生效（比如 AV1 源
+            # 的 expected_ratio 本来就判没收益），不能因为绕过 BPP 就跳过。
+            skip, reason = probe.should_skip(info, ctx.cfg, check_bpp=False)
+        if not skip:
+            if mode == "off":
+                log.info(f"[预检] {em(src.name)}：BPP 低，但 bpp_check=off，"
+                         f"继续处理")
+            elif not ctx.adaptive_enabled:
+                log.info(f"[预检] {em(src.name)}：BPP 低，但没有自适应搜索，"
+                         f"按跳过处理")
+                skip, reason = True, bpp_reason
+            elif ctx.dry_run:
+                skip, reason = True, bpp_reason + \
+                    "（正式运行会先做低成本预检）"
+            else:
+                pilot_reason = _bpp_pilot(ctx, src, info, bpp_reason)
+                if pilot_reason is None:
+                    skip = False
+                else:
+                    skip, reason = True, pilot_reason
     if skip:
         log.info(f"[跳过] {em(src.name)}：{reason}")
         ctx.store.add("skipped", info, reason=reason, mode=ctx.mode)
@@ -221,6 +249,65 @@ def _remux_reencode(ctx: RunContext, src: Path, info) -> str:
     return _remux_gop(ctx, src, info)
 
 
+def _encoder_cfg(ctx: RunContext, info) -> dict:
+    """当前编码器配置 + 按源像素格式决定的 -pix_fmt。"""
+    supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg, ctx.enc_cfg["codec"])
+    return caps.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
+
+
+def _bpp_pilot(ctx: RunContext, src: Path, info,
+               bpp_reason: str) -> "str | None":
+    """BPP 低时的低成本预检。
+
+    用更少、更短的样本和更粗的 CRF 步长跑一次搜索：预检说还有收益就返回
+    None，让调用方继续完整搜索；确认没收益才返回跳过原因。预检不负责定
+    最终 CRF，也不替代完整搜索的 5 段判据。
+
+    预检本身跑不成时沿用原来的 BPP 结论——宁可不压，也不要在量不出画质的
+    情况下回退到固定 CRF 白编几小时。
+    """
+    if not ctx.adaptive_enabled or info.duration <= 0:
+        return bpp_reason
+    pc = ctx.cfg["skip"]["bpp_pilot"]
+    ad = dict(ctx.cfg["adaptive"])
+    ad["sample_count"] = max(1, int(pc.get("sample_count", 1)))
+    ad["sample_seconds"] = float(pc.get("sample_seconds", 4.0))
+    ad["search_step"] = max(0.25, float(pc.get("search_step", 4.0)))
+
+    picked = adaptive.pick_crf(
+        ctx.tools, src, info.duration, _encoder_cfg(ctx, info), ad, log,
+        ctx.lossless_codec, verify.vmaf_model(info, ctx.cfg),
+        fps=info.encode_fps, rate=info.encode_rate, label="预检",
+    )
+    if picked is None:
+        log.warning(f"{em(src.name)}：BPP 预检没跑成，先按 BPP 预筛结论"
+                    f"跳过（加 --force 可重试）")
+        return f"{bpp_reason}（预检没跑成，未能确认是否还有收益）"
+    if not picked.meets_target and ctx.cfg["adaptive"].get(
+            "require_target", True):
+        return (
+            f"预检连 crf={encode.fmt_crf(picked.crf)} 都只有 VMAF "
+            f"{picked.worst_vmaf:.2f}，低于目标 "
+            f"{ctx.cfg['adaptive']['target_vmaf']}，不值得压"
+        )
+    predicted = tracks.predicted_size(
+        info, ctx.cfg, picked.video_bitrate, ctx.out_ext)
+    if predicted is None or info.size <= 0:
+        log.warning(f"{em(src.name)}：BPP 预检算不出体积，交给完整搜索判断")
+        return None
+    saving = 1.0 - predicted / info.size
+    promote = float(pc.get("promote_saving", 0.10))
+    if saving < promote:
+        return (
+            f"BPP 低，预检按 crf={encode.fmt_crf(picked.crf)} 预计只省 "
+            f"{saving:.1%}（低于预检门槛 {promote:.0%}），不启动完整搜索"
+        )
+    log.info(f"[预检] {em(src.name)}：crf={em(encode.fmt_crf(picked.crf))}，"
+             f"样本 {picked.video_bitrate // 1000} kbps，预计省 "
+             f"{em(f'{saving:.1%}')}，继续完整搜索")
+    return None
+
+
 def _compress(ctx: RunContext, src: Path, info) -> str:
     tmp = files.tmp_path(src, ctx.out_ext)
     printer = ProgressPrinter(src.name, ctx.show_progress)
@@ -263,8 +350,7 @@ def _compress(ctx: RunContext, src: Path, info) -> str:
 def _encode(ctx: RunContext, src: Path, info, tmp: Path,
             printer: ProgressPrinter):
     """跑主编码，返回 (实际使用的 crf, 耗时秒, 搜索结论或 None)。"""
-    supported = caps.encoder_pix_fmts(ctx.tools.ffmpeg, ctx.enc_cfg["codec"])
-    enc_cfg = caps.with_pix_fmt(ctx.enc_cfg, info.pix_fmt, supported, log)
+    enc_cfg = _encoder_cfg(ctx, info)
     if ctx.remux:
         # 重封装模式下「该压的照常压」，但 keyint 一并收紧——不然这次压完
         # 下次还得为快进卡顿再重编一遍

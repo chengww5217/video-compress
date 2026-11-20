@@ -205,6 +205,24 @@ class ValidationTests(unittest.TestCase):
         self.assert_rejected({"skip": {"bpp": {"h264": "low"}}},
                              "必须是数字")
 
+    def test_bpp_check_mode_is_validated(self):
+        self.assert_rejected({"skip": {"bpp_check": "maybe"}},
+                             "bpp_check", "hard", "pilot", "off")
+
+    def test_bpp_pilot_is_validated(self):
+        self.assert_rejected({"skip": {"bpp_pilot": {"sample_count": 0}}},
+                             "sample_count", "至少是 1")
+        self.assert_rejected({"skip": {"bpp_pilot": {"sample_seconds": 0}}},
+                             "sample_seconds", "正数")
+        self.assert_rejected({"skip": {"bpp_pilot": {"search_step": 0.1}}},
+                             "search_step", "0.25")
+        self.assert_rejected({"skip": {"bpp_pilot": {"promote_saving": 1.5}}},
+                             "promote_saving", "0 和 1 之间")
+
+    def test_bpp_check_is_case_insensitive(self):
+        cfg = config.normalise({"skip": {"bpp_check": "PILOT"}})
+        self.assertEqual(cfg["skip"]["bpp_check"], "pilot")
+
     def test_integers_are_accepted_where_floats_are_expected(self):
         cfg = config.normalise({"adaptive": {"target_vmaf": 95}})
         self.assertEqual(cfg["adaptive"]["target_vmaf"], 95)

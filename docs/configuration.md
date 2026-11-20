@@ -55,13 +55,17 @@ x265 节只显式写了 `aq-mode=3`（默认 2）和 `psy-rd=2.0`；`placebo` �
 
 ## 跳过规则 `[skip]`
 
-- `bpp` 表：各编码器的每像素码率下限，低于即视为已压到位（只按视频轨码率算）
+- `bpp` 表：各编码器的每像素码率下限（只按视频轨码率算）。低 BPP 只说明源码率低，不等于换 AV1 压不出收益，所以默认不直接跳过
+- `bpp_check = "pilot"`：BPP 低于阈值时怎么办。`pilot` 会先用 `bpp_pilot` 的短样本粗搜一次，预检预计还有收益就继续完整搜索，确认没收益才跳过；`hard` 恢复旧行为（直接跳过）；`off` 完全关掉 BPP 这道筛子
+- `bpp_pilot` 表：预检的 `sample_count`(1) / `sample_seconds`(4) / `search_step`(4) / `promote_saving`(0.10)。样本少而短，只负责筛掉明显没戏的文件；`promote_saving` 故意低于 `min_saving_ratio`，给短样本外推全片的误差留余量
 - `expected_ratio` 表：各编码器的预估压缩比，据此估算收益
 - `min_saving_ratio = 0.15`：预估收益低于此值不压
 - `min_size_mb = 20`：小文件跳过
 - `skip_interlaced = true`：交错源（`field_order` 是 `tt/bb/tb/bt`）直接跳过，理由见「已知限制」
 - `extensions`：处理的容器白名单。默认不含 `.ts`——它和 TypeScript 源码撞扩展名，扫到代码目录会把文本文件当 Transport Stream 收进来；真压 TS 流把 `".ts"` 加回列表即可
 - `tag_marker = "vcompress"`：写入和识别用的元数据标记名，两边始终一致
+
+旧版本因 BPP 跳过的文件已经写进 `results.jsonl`，升级后默认仍按缓存跳过。要按新逻辑重查某个文件，对它单独跑一次 `--force` 即可；`--force` 只忽略缓存，不会绕过元数据标记。
 
 ## 音频与其它轨道 `[audio]`
 

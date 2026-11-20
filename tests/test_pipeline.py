@@ -502,6 +502,92 @@ class PilotCheckPipelineTests(PipelineTestCase):
         self.assertEqual(outcome, pipeline.OK)
 
 
+class BppPilotTests(PipelineTestCase):
+    """BPP 低只是「大概率没戏」，默认先用短样本预检，别直接判死刑。"""
+
+    def setUp(self):
+        super().setUp()
+        self.cfg["adaptive"]["enabled"] = True
+        # 1920x1080@30 + 1 Mbps => BPP 0.016 < h264 的 0.05
+        self.info = make_info(path=self.src, size=1_000_000_000,
+                              duration=600.0, bitrate=1_000_000)
+
+    def run_with_picks(self, *choices):
+        ctx = self.ctx()
+        p1, p2, p3 = self.patches(self.fake_encode())
+        with p1, p2, p3, \
+                mock.patch.object(pipeline.adaptive, "pick_crf",
+                                  side_effect=choices) as pick:
+            return ctx, pipeline.process_file(ctx, self.src), pick
+
+    def test_pilot_with_saving_promotes_to_full_search(self):
+        choice = adaptive.CrfChoice(40, 400_000, True, 96.0)
+        _ctx, outcome, pick = self.run_with_picks(choice, choice)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(pick.call_count, 2, "precheck + full search")
+        pilot_cfg = pick.call_args_list[0].args[4]
+        self.assertEqual(pilot_cfg["sample_count"], 1)
+        self.assertEqual(pilot_cfg["sample_seconds"], 4.0)
+        self.assertEqual(pilot_cfg["search_step"], 4.0)
+        self.assertEqual(pick.call_args_list[0].kwargs["label"], "预检")
+        full_cfg = pick.call_args_list[1].args[4]
+        self.assertEqual(full_cfg["sample_count"], 5)
+        self.assertEqual(pick.call_args_list[1].kwargs.get("label", "搜索"),
+                         "搜索")
+
+    def test_pilot_without_saving_skips_before_full_search(self):
+        # (12 Mbps 视频 + 192 kbps 音频) × 600s / 8 ≈ 914 MB，只省 8.6%
+        choice = adaptive.CrfChoice(16, 12_000_000, True, 96.0)
+        _ctx, outcome, pick = self.run_with_picks(choice)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertEqual(pick.call_count, 1, "预检已判没收益，别再完整搜索")
+        self.assertIn("预检门槛", self.store.last(self.src)["reason"])
+        self.assertFalse((self.root / "a.av1.mkv").exists())
+
+    def test_pilot_failure_keeps_the_bpp_skip(self):
+        _ctx, outcome, pick = self.run_with_picks(None)
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertEqual(pick.call_count, 1)
+        reason = self.store.last(self.src)["reason"]
+        self.assertIn("每像素码率", reason)
+        self.assertIn("预检没跑成", reason)
+        self.assertTrue(self.src.exists())
+
+    def test_hard_mode_skips_without_pilot(self):
+        self.cfg["skip"]["bpp_check"] = "hard"
+        _ctx, outcome, pick = self.run_with_picks(
+            adaptive.CrfChoice(40, 400_000, True, 96.0))
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertFalse(pick.called)
+        self.assertIn("每像素码率", self.store.last(self.src)["reason"])
+
+    def test_off_mode_ignores_the_bpp_gate(self):
+        self.cfg["skip"]["bpp_check"] = "off"
+        choice = adaptive.CrfChoice(40, 400_000, True, 96.0)
+        _ctx, outcome, pick = self.run_with_picks(choice)
+        self.assertEqual(outcome, pipeline.OK)
+        self.assertEqual(pick.call_count, 1, "关掉 BPP 门后只跑完整搜索")
+
+    def test_low_bpp_without_adaptive_search_still_skips(self):
+        self.cfg["adaptive"]["enabled"] = False
+        _ctx, outcome, pick = self.run_with_picks(
+            adaptive.CrfChoice(40, 400_000, True, 96.0))
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertFalse(pick.called)
+
+    def test_bypassing_bpp_does_not_bypass_expected_ratio(self):
+        """AV1 源本来就只能省 8%，关掉 BPP 门也不能把它放进编码队列。"""
+        self.cfg["skip"]["bpp_check"] = "off"
+        self.info = make_info(path=self.src, size=1_000_000_000,
+                              duration=600.0, bitrate=1_000_000,
+                              video_codec="av1", codec_family="av1")
+        _ctx, outcome, pick = self.run_with_picks(
+            adaptive.CrfChoice(40, 400_000, True, 96.0))
+        self.assertEqual(outcome, pipeline.SKIPPED)
+        self.assertFalse(pick.called)
+        self.assertIn("预估只能省", self.store.last(self.src)["reason"])
+
+
 class FractionalCrfTests(PipelineTestCase):
     """0.25 级 CRF 要一路走到 ffmpeg 命令和记录里，不能在半路被截成整数。"""
 
