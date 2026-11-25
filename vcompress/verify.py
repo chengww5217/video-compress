@@ -197,8 +197,17 @@ def check_basic(orig_info, out_info, cfg):
     一半的产物重跑一次就好了），两者的后果不同，不该混在一个函数里。
     """
     max_diff = to_float(cfg["verify"].get("max_duration_diff_s"), 0.5)
-    if orig_info.duration > 0 and out_info.duration > 0:
-        diff = abs(orig_info.duration - out_info.duration)
+    # 优先比视频轨时长。mp4 的 edit list 会把开头裁掉，但 AAC 的编码器延迟
+    # 让音频首包落在负时间戳上；mkv 的容器时长按「最晚结束 - 最早开始」算，
+    # 于是裁掉的那一秒又被加了回来，产物凭空多出 ~1s。整段内容其实没丢，
+    # 用容器时长比就会误判。视频轨是实际重编码的对象，截短了必须拦住。
+    # 容器给不出分轨时长时（老文件/异常容器）退回原来的整容器时长。
+    orig_duration, out_duration = orig_info.duration, out_info.duration
+    if orig_info.video_duration > 0 and out_info.video_duration > 0:
+        orig_duration = orig_info.video_duration
+        out_duration = out_info.video_duration
+    if orig_duration > 0 and out_duration > 0:
+        diff = abs(orig_duration - out_duration)
         if diff > max_diff:
             return False, f"时长差了 {diff:.2f}s，超过允许的 {max_diff}s"
     if not out_info.video_codec:

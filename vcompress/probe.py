@@ -116,6 +116,10 @@ class VideoInfo:
     bitrate: int = 0
     container_bitrate: int = 0
     duration: float = 0.0
+    # 视频轨自己的时长。mp4 的 edit list 会给 AAC 留下负的起始时间戳，
+    # mkv 容器时长按「最晚结束 - 最早开始」计算，会把裁掉的开头又加回来；
+    # 视频轨时长才是编码真正处理的内容长度（见 verify.check_basic）。
+    video_duration: float = 0.0
     size: int = 0
     pix_fmt: str = ""
     field_order: str = ""
@@ -441,6 +445,23 @@ def _stream_bitrate(stream: dict) -> int:
     return to_int(stream.get("bit_rate")) or to_int(bps)
 
 
+def _tag_duration(stream: dict) -> float:
+    """matroska 不给 stream.duration，只在标签里写 DURATION=HH:MM:SS.nnn。
+
+    这个值按轨计算，不受容器整体起止时间的影响，正好拿来判断视频轨有没有
+    被截短；解析不了就当没给。
+    """
+    for key, value in (stream.get("tags") or {}).items():
+        if str(key).upper() != "DURATION":
+            continue
+        try:
+            hours, minutes, seconds = str(value).strip().split(":")
+            return int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+        except (TypeError, ValueError):
+            return 0.0
+    return 0.0
+
+
 def _color_tag(value) -> str:
     """规范化色彩属性值；没标的一律返回空串。"""
     text = str(value or "").strip().lower()
@@ -571,6 +592,8 @@ def probe(tools: Tools, path: Path,
     info.container_bitrate = to_int(fmt.get("bit_rate"))
     info.duration = to_float(fmt.get("duration")) or \
         to_float(vstream.get("duration"))
+    info.video_duration = to_float(vstream.get("duration")) or \
+        _tag_duration(vstream)
     info.size = to_int(fmt.get("size"), default=0) or _file_size(path)
     tags = {k.lower(): v for k, v in (fmt.get("tags") or {}).items()}
     info.comment = str(tags.get("comment") or tags.get("description") or "")

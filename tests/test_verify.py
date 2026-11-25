@@ -82,6 +82,27 @@ class CheckBasicTests(unittest.TestCase):
         self.assertFalse(ok)
         self.assertIn("时长", msg)
 
+    def test_negative_audio_start_is_not_a_duration_mismatch(self):
+        """源带 edit list 时，mkv 容器时长会比视频轨多出裁掉的开头。
+
+        音频首包落在负时间戳上，容器时长按「最晚结束 - 最早开始」算，把
+        裁掉的开头又加了回来；视频内容其实一帧没少，不能因此判失败。
+        """
+        orig = make_info(duration=600.0, video_duration=600.0)
+        out = make_info(video_codec="av1", duration=601.01,
+                        video_duration=600.03)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertTrue(ok, msg)
+
+    def test_video_track_truncation_fails_even_if_container_matches(self):
+        """容器时长只能看整体，视频轨被截短必须单独拦住。"""
+        orig = make_info(duration=600.0, video_duration=600.0)
+        out = make_info(video_codec="av1", duration=600.0,
+                        video_duration=598.4)
+        ok, msg = check_basic(orig, out, self.cfg)
+        self.assertFalse(ok)
+        self.assertIn("时长", msg)
+
     def test_missing_video_stream_fails(self):
         out = make_info(video_codec="", duration=600.0)
         ok, msg = check_basic(self.orig, out, self.cfg)

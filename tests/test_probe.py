@@ -481,6 +481,23 @@ class ProbeTargetRateTests(unittest.TestCase):
         self.assertEqual(info.target_rate, "24000/1001")
         self.assertAlmostEqual(info.encode_fps, 24000 / 1001, places=3)
 
+    def test_mkv_track_duration_tag_fills_in_video_duration(self):
+        """mkv 的 stream.duration 是 N/A，分轨时长只写在 DURATION 标签里。"""
+        data = self.stream("30", "30")
+        del data["streams"][0]["duration"]
+        data["streams"][0]["tags"] = {"DURATION": "00:00:10.500000000"}
+        info = self.run_probe(data)
+        self.assertAlmostEqual(info.video_duration, 10.5)
+        # 容器时长仍然按 format 走，两者语义不同
+        self.assertAlmostEqual(info.duration, 10.0)
+
+    def test_unparsable_track_duration_falls_back_to_zero(self):
+        data = self.stream("30", "30")
+        del data["streams"][0]["duration"]
+        data["streams"][0]["tags"] = {"DURATION": "garbage"}
+        info = self.run_probe(data)
+        self.assertEqual(info.video_duration, 0.0)
+
     def test_unresolved_vfr_is_skipped_not_silently_dropped(self):
         info = self.run_probe(self.stream("99/4", "2477295/88943"),
                               "", rc=1)
